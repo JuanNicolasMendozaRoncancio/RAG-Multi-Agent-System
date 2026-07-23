@@ -1,0 +1,59 @@
+version: "3.9"
+
+networks:
+  rag_net:
+    driver: bridge
+
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: api/dockerfile
+    ports:
+      -"8000:8000"
+    env_file:
+      - .env
+    networks:
+      - rag_net
+    depends_on:
+      nlp_woker:
+        condition: service_started
+      agent_worker:
+        condition: service_started
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/dockerfile
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    networks:
+      - rag_net
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  nlp_worker:
+    build:
+      context: .
+      dockerfile: nlp_worker/Dockerfile
+    env_file:
+      - .env
+    networks:
+      - rag_net
+    restart: unless-stopped
+
+  agent_worker:
+    build:
+      context: .
+      dockerfile: agent_worker/Dockerfile
+    env_file:
+      - .env
+    networks:
+      - rag_net
+    restart: unless-stopped
