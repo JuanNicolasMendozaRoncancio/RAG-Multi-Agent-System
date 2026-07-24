@@ -1,2 +1,4 @@
 trafilatura == 2.1.0
 feedparser == 6.0.12
+spacy==3.8.13
+langdetect==1.0.9
