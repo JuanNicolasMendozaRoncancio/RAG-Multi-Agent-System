@@ -146,8 +146,6 @@ async def insert_raw_articles_bulk(
 async def get_unprocessed_raw_urls() -> list[str]:
     """
     Return URLs in RAW that have no corresponding document in CLEAN.
- 
-    Why compare by URL and not by sha256:
     
     This function is a stub — it returns an empty list until Step 4 
     is implemented and CLEAN starts being populated.
@@ -173,6 +171,50 @@ async def insert_clean_article(article: dict[str, Any]) -> None:
     """
     await _col(COL_CLEAN).insert_one(article)
 
+
+async def get_unclassified_clean_urls() -> list[str]:
+    """
+    Return URLs in CLEAN that have a topic_id but no corresponding
+    document in CURATED.
+
+    Why filter by topic_id presence:
+    Sentiment classification uses the topic as context. An article without
+    topic_id has not completed the BERTopic step (Step 6) and is not ready
+    for sentiment classification.
+
+    Why compare by URL (not sha256):
+    URL is the canonical article identifier shared across all collections.
+    sha256 is derived from URL, so comparing URLs directly is equivalent
+    but more readable and directly indexable (CURATED has a URL index).
+    """
+    clean_cursor = _col(COL_CLEAN).find(
+        {"topic_id": {"$exists": True}}, {"url": 1, "_id": 0}
+    )
+    clean_urls = {doc["url"] async for doc in clean_cursor}
+
+    curated_cursor = _col(COL_CURATED).find({}, {"url": 1, "_id": 0})
+    curated_urls = {doc["url"] async for doc in curated_cursor}
+
+    return list(clean_urls - curated_urls)
+
+async def insert_curated_article(article: dict[str, Any]) -> None:
+    """
+    Insert one fully-enriched article into CURATED.
+
+    The article dict is expected to contain all CLEAN fields plus:
+    - topic_id: int          (from BERTopic, Step 6)
+    - sentiment: str       
+    - intensity: float      (0.0 – 1.0)
+    - principal_subject: str    (LLM-extracted topic label)
+    - main_argument: str (LLM-extracted main argument)
+
+    Why insert into CURATED instead of $set on CLEAN:
+    CURATED is the final, self-contained schema that the LangGraph agents
+    read in Step 11. Keeping it as a separate collection means agents
+    never need to join across collections, and a failed sentiment run
+    cannot leave CLEAN in a partially-modified state.
+    """
+    await _col(COL_CURATED).insert_one(article)
 # ---------------------------------------------------------------------------
 # SUMMARIES collection — agent output layer
 # ---------------------------------------------------------------------------
@@ -233,7 +275,10 @@ async def ensure_indexes() -> None:
     await clean.create_index("url", unique=True, name="clean_url_unique")
     await clean.create_index("source", name="clean_source")
     await clean.create_index("detected_language", name="clean_detected_language")
- 
+
+    await _col(COL_CURATED).create_index("url", 
+        unique=True, name="curated_url_unique"
+    )
     # SUMMARIES indexes
     await _col(COL_SUMMARIES).create_index(
         "timestamp", name="summaries_timestamp"
