@@ -269,3 +269,77 @@ async def embed_articles(batch_size: int = _BATCH_SIZE) -> dict[str, int]:
     }
     logger.info("Embedding run complete: %s", summary)
     return summary
+
+# ---------------------------------------------------------------------------
+# Local
+# ---------------------------------------------------------------------------
+async def embed_articles_local(batch_size: int = _BATCH_SIZE) -> dict[str, int]:
+    """
+    Local variant of embed_articles() using sentence-transformers directly.
+
+    Use this when the HF Serverless API is unreachable (local development).
+    Produces identical 384-dimensional vectors — same model, same weights.
+    In production (Docker/HF Spaces), use embed_articles() with the API instead.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    db = get_db()
+    col = db[COL_CLEAN]
+
+    cursor = col.find(
+        {"embedding": {"$exists": False}},
+        {"_id": 1, "url": 1, "lemmatized_tokens": 1},
+    )
+    docs: list[dict[str, Any]] = await cursor.to_list(length=None)
+    already_cached_count = await col.count_documents({"embedding": {"$exists": True}})
+
+    if not docs:
+        logger.info("All CLEAN articles already have embeddings.")
+        return {"embedded": 0, "skipped_no_tokens": 0, "skipped_api_error": 0, "already_cached": already_cached_count}
+
+    logger.info("Found %d articles without embeddings (%d already cached).", len(docs), already_cached_count)
+
+    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+
+    embedded = skipped_no_tokens = 0
+
+    for batch_start in range(0, len(docs), batch_size):
+        batch = docs[batch_start: batch_start + batch_size]
+
+        pairs: list[tuple[dict[str, Any], str]] = []
+        for doc in batch:
+            text = _tokens_to_text(doc)
+            if text is None:
+                skipped_no_tokens += 1
+            else:
+                pairs.append((doc, text))
+
+        if not pairs:
+            continue
+
+        texts = [text for _, text in pairs]
+        vectors = model.encode(texts, show_progress_bar=False).tolist()
+
+        for (doc, _), vector in zip(pairs, vectors):
+            await col.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"embedding": vector}},
+            )
+            embedded += 1
+
+        logger.info("Batch %d–%d: embedded %d articles.", batch_start, batch_start + len(batch) - 1, len(pairs))
+
+    summary = {"embedded": embedded, "skipped_no_tokens": skipped_no_tokens, "skipped_api_error": 0, "already_cached": already_cached_count}
+    logger.info("Embedding run complete: %s", summary)
+    return summary
+
+
+if __name__ == "__main__":
+    import asyncio
+    from dotenv import load_dotenv
+    load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    asyncio.run(embed_articles_local())

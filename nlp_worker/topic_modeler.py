@@ -119,88 +119,35 @@ def _build_bertopic_model() -> BERTopic:
         verbose=False,
     )
 
-def _load_embeddings_from_db(db: Any) -> tuple[list[str], np.ndarray]:
-    """
-    Fetch all CLEAN documents that have an embedding field.
- 
-    Returns
-    -------
-    urls : list[str]
-        Article URLs in the same order as the embedding matrix rows.
-    embeddings : np.ndarray
-        Shape (n_articles, 384). Each row is the embedding of one article.
- 
-    Why return URLs alongside embeddings:
-    After BERTopic assigns a topic id to each row, we need the URL to write
-    the assignment back to the correct MongoDB document. Keeping URLs and
-    embedding rows in the same order makes that mapping O(1) by index.
- 
-    Why np.ndarray and not list[list[float]]:
-    BERTopic.fit_transform() expects a numpy array. Converting a list of
-    lists requires an extra allocation; returning ndarray directly avoids it.
-    The dtype float32 halves memory vs float64 with no precision loss for
-    cosine-based operations.
-    """
+async def _load_embeddings_from_db(db: Any) -> tuple[list[str], list[list[str]], np.ndarray]:
     col = db[COL_CLEAN]
 
-    docs = list(col.find(
+    docs = await col.find(
         {"embedding": {"$exists": True}},
-        {"url": 1, "embedding": 1, "_id": 0},
-    ))
+        {"url": 1, "embedding": 1, "lemmatized_tokens": 1, "_id": 0},
+    ).to_list(length=None)
 
     if not docs:
-        return [], np.empty((0, 384), dtype= np.float32)
+        return [], [], np.empty((0, 384), dtype=np.float32)
 
     urls = [doc["url"] for doc in docs]
+    token_lists = [doc.get("lemmatized_tokens", []) for doc in docs]
     embeddings = np.array(
         [doc["embedding"] for doc in docs],
         dtype=np.float32,
     )
-    return urls, embeddings
+    return urls, token_lists, embeddings
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def train_topic_model(
+async def train_topic_model(
     model_path: str = _DEFAULT_MODEL_PATH,
     min_articles: int = 20,
 ) -> dict[str, Any]:
-    """
-    Train BERTopic on all CLEAN embeddings and serialise the model.
- 
-    This function is designed to be called once — on the initial corpus —
-    and then not again unless explicitly triggered (e.g. a major corpus
-    expansion or topic drift). Nightly runs call assign_topics() instead.
- 
-    Parameters
-    ----------
-    model_path:
-        Filesystem path where the trained model is saved with joblib.
-        Parent directory is created if it does not exist.
-    min_articles:
-        Minimum number of articles with embeddings required to train.
-        Training BERTopic on fewer than ~20 articles produces unreliable
-        topics because HDBSCAN cannot form stable clusters.
- 
-    Returns
-    -------
-    dict[str, Any]
-        Summary with keys:
-        - n_articles: int — number of articles used for training
-        - n_topics: int — number of topics found (excluding noise topic -1)
-        - topic_labels: dict[int, list[str]] — top-10 keywords per topic
-        - model_path: str — where the model was saved
-        - noise_fraction: float — fraction of articles assigned to topic -1
- 
-    Raises
-    ------
-    ValueError
-        If fewer than min_articles embeddings are found in CLEAN.
-    RuntimeError
-        If MONGODB_URI is not set.
-    """
+    
     db = get_db()
-    urls, embeddings = _load_embeddings_from_db(db)
+    urls, token_lists, embeddings = await _load_embeddings_from_db(db)
 
     n_articles = len(urls)
     logger.info("Loaded %d embeddings from CLEAN for BERTopic training.", n_articles)
@@ -214,20 +161,12 @@ def train_topic_model(
     model = _build_bertopic_model()
 
     logger.info("Training BERTopic (UMAP 384→5 + HDBSCAN)...")
-    topics, _ = model.fit_transform(embeddings)
-    # topics: list[int], one topic id per article. -1 = noise (no cluster).
-    # _     : list[float], per-document probabilities (unused here — we store
-    #         only the topic id, not the soft probability).
+    placeholder_docs = [" ".join(tokens) for tokens in token_lists]
+    topics, _ = model.fit_transform(placeholder_docs, embeddings)
 
-    # Write topic assignments back to MongoDB.
-    # Why update_one with $set and not bulk_write here:
-    # The number of articles is bounded by the M0 corpus size (~hundreds to
-    # low thousands). Individual update_one calls are acceptable. If the
-    # corpus grew to tens of thousands, switching to bulk_write would be
-    # the right optimisation — but that is premature here.
     col = db[COL_CLEAN]
     for url, topic_id in zip(urls, topics):
-        col.update_one(
+        await col.update_one(                              # await añadido
             {"url": url},
             {"$set": {"topic_id": int(topic_id)}},
         )
@@ -258,42 +197,12 @@ def train_topic_model(
         "noise_fraction": noise_fraction,
     }
     logger.info("Training complete: %s", summary)
-    
     return summary
 
-def assign_topics(
+
+async def assign_topics(
     model_path: str = _DEFAULT_MODEL_PATH,
-):
-    """
-    Assign topics to CLEAN articles that do not yet have a topic_id field.
- 
-    Loads the serialised BERTopic model and calls model.transform()
-    on the new embeddings. Does NOT retrain the model.
- 
-    Why model.transform() and not re-running fit_transform():
-    transform() projects new embeddings through the *fitted* UMAP (preserving
-    the training topology) and then calls HDBSCAN's approximate_predict
-    internally via BERTopic's hdbscan_delegator. This is the correct
-    BERTopic API for inference on new documents. Re-running fit_transform()
-    would re-train from scratch, producing a different topic numbering each run.
- 
-    Parameters
-    ----------
-    model_path:
-        Path to the joblib-serialised BERTopic model produced by
-        train_topic_model().
- 
-    Returns
-    -------
-    dict[str, int]
-        Keys: 'assigned', 'skipped_no_embedding', 'noise'
-        'noise' counts articles assigned to topic -1 (no cluster found).
- 
-    Raises
-    ------
-    FileNotFoundError
-        If the model file does not exist (train_topic_model() not yet run).
-    """
+) -> dict[str, int]:
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"Trained BERTopic model not found at '{model_path}'. "
@@ -306,10 +215,10 @@ def assign_topics(
     db = get_db()
     col = db[COL_CLEAN]
 
-    docs = list(col.find(
+    docs = await col.find(                                 # await añadido
         {"embedding": {"$exists": True}, "topic_id": {"$exists": False}},
         {"url": 1, "embedding": 1, "_id": 0},
-    ))
+    ).to_list(length=None)
 
     if not docs:
         logger.info("No new articles to assign topics to.")
@@ -324,11 +233,11 @@ def assign_topics(
     logger.info("Assigning topics to %d new articles...", len(docs))
 
     placeholder_docs = ["" for _ in urls]
-    topics, _ = model.transform(placeholder_docs, embeddings= embeddings)
+    topics, _ = model.transform(placeholder_docs, embeddings=embeddings)
 
     assigned = noise = 0
     for url, topic_id in zip(urls, topics):
-        col.update_one(
+        await col.update_one(                              # await añadido
             {"url": url},
             {"$set": {"topic_id": int(topic_id)}},
         )
@@ -336,10 +245,22 @@ def assign_topics(
             noise += 1
         else:
             assigned += 1
+
     summary = {
         "assigned": assigned,
-        "skipped_no_embedding": 0,   # filtered by query above
+        "skipped_no_embedding": 0,
         "noise": noise,
     }
     logger.info("Topic assignment complete: %s", summary)
     return summary
+
+if __name__ == "__main__":
+    import asyncio
+    from dotenv import load_dotenv
+    load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    summary = asyncio.run(train_topic_model())
+    print(summary)

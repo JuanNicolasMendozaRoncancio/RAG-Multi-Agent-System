@@ -309,6 +309,8 @@ async def run_nlp_pipeline() -> dict[str, int]:
 # ---------------------------------------------------------------------------
  
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

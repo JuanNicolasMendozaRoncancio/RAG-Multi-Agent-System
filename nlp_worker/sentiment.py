@@ -175,3 +175,14 @@ async def run_sentiment_pipeline() -> dict[str, int]:
     }
     logger.info("Sentiment pipeline complete: %s", summary)
     return summary
+
+
+if __name__ == "__main__":
+    import asyncio
+    from dotenv import load_dotenv
+    load_dotenv()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    asyncio.run(run_sentiment_pipeline())

@@ -70,11 +70,10 @@ logger = logging.getLogger(__name__)
 # Provider configuration
 # ---------------------------------------------------------------------------
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-_GROQ_MODEL = "llama-3.1-8b-instruct"
+_GROQ_MODEL = "llama-3.1-8b-instant"
  
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
-_GEMINI_MODEL = "gemini-2.0-flash-exp"
-
+_GEMINI_MODEL = "gemini-2.0-flash"
 TIMEOUT_S = 30.0
 
 # ---------------------------------------------------------------------------
