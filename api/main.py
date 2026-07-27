@@ -39,9 +39,12 @@ import logging
 import os
 import time
 from typing import AsyncGenerator
+from typing import Any, Optional
+import asyncio
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi import Query, HTTPException
 from fastapi.responses import StreamingResponse
 
 load_dotenv()
@@ -312,3 +315,227 @@ async def health() -> dict:
         "mongodb": db_status,
         "llm_provider": os.getenv("LLM_PROVIDER", "groq"),
     }
+
+# ---------------------------------------------------------------------------
+# GET /articles
+# ---------------------------------------------------------------------------
+@app.get("/articles")
+async def get_articles(
+    source: Optional[str] = Query(None, description="Filter by source name"),
+    language: Optional[str] = Query(None, description="Filter by ISO 639-1 language code"),
+    sentiment: Optional[str] = Query(None, description="Filter by sentiment: positive|negative|neutral"),
+    topic_id: Optional[int] = Query(None, description="Filter by BERTopic topic_id"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum number of articles to return"),
+    skip: int = Query(0, ge=0, description="Number of articles to skip (pagination)"),
+) -> dict[str, Any]:
+    """
+    Return articles from CURATED with optional filters.
+ 
+    Why CURATED and not CLEAN:
+    CURATED is the final enriched schema — it has sentiment, topic_id,
+    principal_subject, and main_argument that the dashboard needs to display.
+ 
+    Why exclude embedding, lemmatized_tokens, entities:
+    These fields are large (embedding = 384 floats ~3KB, lemmatized_tokens
+    can be 200+ items) and are consumed only by the NLP pipeline and agents
+    internally. Serialising them across the API boundary wastes bandwidth
+    and serialisation time with no benefit to the dashboard consumer.
+ 
+    Why limit + skip and not cursor-based pagination:
+    The corpus is small (~222 articles, growing slowly). Offset pagination
+    is simpler to implement and consume. Cursor-based pagination adds
+    complexity (stable sort + cursor token) only justified at >10k documents.
+    """ 
+    from shared.db import get_db, COL_CURATED
+    db = get_db()
+    col = db[COL_CURATED]
+
+    query: dict[str, Any] = {}
+    if source:
+        query["source"] = source
+    if language:
+        query["detected_language"] = language
+    if sentiment:
+        if sentiment not in ("positive", "negative", "neutral"):
+            raise HTTPException(status_code=400, detail="sentiment must be positive, negative, or neutral")
+        query["sentiment"] = sentiment
+    if topic_id is not None:
+        query["topic_id"] = topic_id
+
+    projection = {
+        "embedding": 0,
+        "lemmatized_tokens": 0,
+        "entities": 0,
+        "_id": 0,
+    }
+
+    cursor = col.find(query, projection).sort("ingestion_date", -1).skip(skip).limit(limit)
+    articles = await cursor.to_list(length=limit)
+ 
+    total = await col.count_documents(query)
+ 
+    return {
+        "total": total,
+        "returned": len(articles),
+        "skip": skip,
+        "limit": limit,
+        "articles": articles,
+    }
+
+# ---------------------------------------------------------------------------
+# GET /topics
+# ---------------------------------------------------------------------------
+@app.get("/topics")
+async def get_topics(
+    days: int = Query(7, ge=1, le=90, description="Lookback window in days"),
+) -> dict[str, Any]:
+    """
+    Return active topics with article count and dominant sentiment for the period.
+ 
+    Why reuse _query_by_topic() from agent_worker.agents:
+    That function already implements the correct MongoDB aggregation over CURATED
+    with the right date filter and grouping logic. Duplicating it would create
+    two sources of truth. We call it in run_in_executor() because it uses pymongo
+    (blocking I/O) and must not run directly inside an async route handler.
+ 
+    Why run_in_executor and not asyncio.to_thread:
+    Both are equivalent for CPU-bound or blocking I/O work. run_in_executor(None, fn)
+    uses the default ThreadPoolExecutor and is the established FastAPI pattern for
+    running synchronous blocking code without blocking the event loop.
+    """
+    from agent_worker.agents import _query_by_topic, _get_sync_db
+
+    loop = asyncio.get_event_loop()
+    db = await loop.run_in_executor(None, _get_sync_db)
+    by_topic = await loop.run_in_executor(None, _query_by_topic, db, days)
+
+    total_articles = sum(v["count"] for v in by_topic.values())
+
+    topics = []
+    for topic_id_str, stats in sorted(by_topic.items(), key = lambda x:x[1]["count"], reverse= True):
+        topics.append({
+            "topic_id": int(topic_id_str),
+            "count": stats["count"],
+            "relative_frequency": round(stats["count"] / total_articles, 4) if total_articles else 0.0,
+            "avg_intensity": stats["avg_intensity"],
+            "dominant_sentiment": stats["dominant_sentiment"],
+        })
+ 
+    return {
+        "days": days,
+        "total_articles_in_period": total_articles,
+        "topics": topics,
+    }
+
+@app.get("/contradictions")
+async def get_contradictions(
+    days: int = Query(7, ge=1, le=90, description="Lookback window in days"),
+    threshold: float = Query(0.65, ge=0.0, le=1.0, description="Minimum cosine similarity score"),
+    max_pairs: int = Query(5, ge=1, le=20, description="Maximum number of contradiction pairs to return"),
+) -> dict[str, Any]:
+    """
+    Return pairs of articles with similar topics but opposing sentiment.
+ 
+    Why threshold=0.65 as default and not 0.85:
+    The corpus has 222 articles. At 0.85, the Vector Search returns zero pairs
+    in most cases because articles must be nearly identical in semantic content.
+    0.65 captures articles covering the same topic (e.g. offshore wind expansion)
+    with genuinely opposite framings — which is the useful signal. The caller
+    can raise the threshold via the query parameter if stricter matching is needed.
+ 
+    Why reuse _find_contradictions() from agent_worker.agents:
+    Same reasoning as /topics — avoids duplicating the Vector Search pipeline
+    logic. Called via run_in_executor() because _find_contradictions() uses
+    pymongo's synchronous aggregation with $vectorSearch.
+    """
+    from agent_worker.agents import _find_contradictions, _get_sync_db
+ 
+    loop = asyncio.get_event_loop()
+    db = await loop.run_in_executor(None, _get_sync_db)
+    pairs = await loop.run_in_executor(
+        None, _find_contradictions, db, days, threshold, max_pairs
+    )
+ 
+    return {
+        "days": days,
+        "threshold": threshold,
+        "contradiction_count": len(pairs),
+        "pairs": pairs,
+    }
+
+# ---------------------------------------------------------------------------
+# GET /trends
+# ---------------------------------------------------------------------------
+ 
+@app.get("/trends")
+async def get_trends(
+    days: int = Query(7, ge=1, le=90, description="Lookback window in days"),
+) -> dict[str, Any]:
+    """
+    Return weekly topic frequency and sentiment evolution, plus rising topics.
+ 
+    Why combine _compute_topic_trend() and _detect_rising_topics() in one endpoint:
+    The dashboard Tab 4 needs both: the time series data for the area chart and
+    the rising topics list for the trend card. A single endpoint call avoids
+    two round trips and two separate pymongo connections from the dashboard.
+ 
+    Why ISO week granularity and not daily:
+    With ~30 articles/week across 6 sources, daily granularity produces sparse
+    data with many zero-count days. ISO week grouping yields meaningful frequency
+    signals even on the small corpus. The dashboard can display this as a bar
+    chart per week with no loss of interpretability.
+    """
+    from agent_worker.agents import _compute_topic_trend, _detect_rising_topics, _get_sync_db
+ 
+    loop = asyncio.get_event_loop()
+    db = await loop.run_in_executor(None, _get_sync_db)
+    topic_trends = await loop.run_in_executor(None, _compute_topic_trend, db, days)
+    rising_topics = _detect_rising_topics(topic_trends)
+ 
+    # _detect_rising_topics is pure Python (no I/O) — no need for run_in_executor
+ 
+    return {
+        "days": days,
+        "rising_topics": rising_topics,
+        "topic_trends": topic_trends,
+    }
+
+# ---------------------------------------------------------------------------
+# GET /summary
+# ---------------------------------------------------------------------------
+ 
+@app.get("/summary")
+async def get_summary() -> dict[str, Any]:
+    """
+    Return the most recent narrative summary produced by the Synthesis Agent.
+ 
+    Why sort by timestamp descending and return only one document:
+    The dashboard Tab 4 displays a single 'current state of discourse' card.
+    Historical summaries are audit data — useful for the notebook walkthrough
+    but not for the live dashboard. The caller can inspect SUMMARIES directly
+    for historical access.
+ 
+    Why not paginate SUMMARIES here:
+    There will be at most one summary per pipeline run (~1/day with nightly
+    Prefect). Pagination adds complexity with no practical benefit at that
+    volume. A dedicated /summaries/history endpoint can be added in Step 22
+    (notebook) if needed.
+    """
+    from shared.db import get_db, COL_SUMMARIES
+
+    db = get_db()
+    col = db[COL_SUMMARIES]
+ 
+    doc = await col.find_one(
+        {},
+        {"_id": 0},
+        sort=[("timestamp", -1)],
+    )
+ 
+    if doc is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No summaries found. Run POST /pipeline/run first.",
+        )
+ 
+    return doc
