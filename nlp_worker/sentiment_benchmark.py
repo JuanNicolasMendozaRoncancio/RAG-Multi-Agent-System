@@ -157,7 +157,7 @@ def _classify_with_provider(
  
     Returns the sentiment string or None if the call fails.
     """
-    os.environ["LLM_PROVDER"] = provider
+    os.environ["LLM_PROVIDER"] = provider
 
     title = article.get("title") or ""
     text = article.get("text") or ""

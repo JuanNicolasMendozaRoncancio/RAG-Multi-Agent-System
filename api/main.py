@@ -216,6 +216,33 @@ async def _pipeline_generator() -> AsyncGenerator[str, None]:
         logger.error("Sentimiento step failed: %s", exc, exc_info=True)
         yield _sse({"step": "Sentiment", "status": "error", "detail": str(exc)})
         return
+    
+    # ------------------------------------------------------------------
+    # Step 6: Agents (Analytical → Contradiction → Trend → Synthesis)
+    # run_agents() is synchronous — run in executor to avoid blocking
+    # the event loop during the ~20s agent execution.
+    # ------------------------------------------------------------------
+    yield _sse({"step": "Agents", "status": "running"})
+    t0 = time.perf_counter()
+    try:
+        import asyncio
+        from agent_worker.agents import run_agents
+        loop = asyncio.get_event_loop()
+        agents_result = await loop.run_in_executor(None, run_agents)
+        elapsed = round(time.perf_counter() - t0, 2)
+        yield _sse({
+            "step": "Agents",
+            "status": "done",
+            "elapsed_s": elapsed,
+            "insights": len(agents_result.get("analytical_insights", {}).get("insights", [])),
+            "contradictions": agents_result.get("contradictions", {}).get("contradiction_count", 0) if isinstance(agents_result.get("contradictions"), dict) else 0,
+            "summary_chars": len(agents_result.get("summary", "")),
+            "errors": agents_result.get("errors", []),
+        })
+    except Exception as exc:
+        logger.error("Agents step failed: %s", exc, exc_info=True)
+        yield _sse({"step": "Agents", "status": "error", "detail": str(exc)})
+        return
 
     # ------------------------------------------------------------------
     # Final event

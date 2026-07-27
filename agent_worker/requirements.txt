@@ -1,0 +1,9 @@
+langgraph==0.2.55
+langchain==0.3.13
+langchain-core==0.3.28
+langsmith==0.2.3
+openai>=1.0
+motor==3.6.0
+pymongo==4.9.2
+numpy>=1.24
+python-dotenv>=1.0
