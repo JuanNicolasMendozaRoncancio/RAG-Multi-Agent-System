@@ -707,6 +707,7 @@ async def _enconde_query_local(query: str) -> list[float]:
             status_code=503,
             detail="Embedding service unreachable.",
         )
+
 # ---------------------------------------------------------------------------
 # GET /rag/search  — semantic retrieval endpoint
 # ---------------------------------------------------------------------------
