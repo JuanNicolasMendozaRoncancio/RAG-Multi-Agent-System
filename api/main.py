@@ -539,3 +539,345 @@ async def get_summary() -> dict[str, Any]:
         )
  
     return doc
+
+# ---------------------------------------------------------------------------
+# Authentication dependency — inter-system endpoints (/rag/*)
+# ---------------------------------------------------------------------------
+from fastapi import Depends, Header
+
+def verify_rag_key(x_rag_key: str = Header(...)) -> None:
+    """
+    Validate the X-RAG-Key header against the RAG_API_KEY environment variable.
+ 
+    Why a FastAPI dependency and not middleware:
+    Middleware applies to ALL routes. Only the /rag/* endpoints require
+    authentication — internal endpoints (/articles, /topics, etc.) are
+    consumed by the dashboard on the same network and do not need a key.
+    A dependency injected per-endpoint is surgical: it adds auth exactly
+    where needed without touching the rest of the API.
+ 
+    Why Header(...) with no default:
+    The ellipsis makes the header required — FastAPI returns 422 automatically
+    if it is absent. We then return 401 explicitly if the value is wrong,
+    which is the semantically correct HTTP response for authentication failure
+    (422 = malformed request, 401 = valid request but unauthenticated).
+ 
+    Raises
+    ------
+    HTTPException 401
+        If RAG_API_KEY is not configured or the provided key does not match.
+    """
+    expected = os.getenv("RAG_API_KEY")
+    if not expected:
+        raise HTTPException(
+            status_code=500,
+            detail="RAG_API_KEY is not configured on the server.",
+        )
+    if x_rag_key != expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid X-RAG-Key.",
+        )
+
+# ---------------------------------------------------------------------------
+# HF Serverless API helper — encode a single query string into a 384-dim vector
+# ---------------------------------------------------------------------------
+import httpx 
+
+_HF_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+_HF_ENCODE_URL = (
+    f"https://api-inference.huggingface.co/pipeline/feature-extraction/{_HF_MODEL}"
+)
+_HF_TIMEOUT = 60.0  # seconds — accounts for cold start on HF free tier
+
+async def _enconde_query(query: str) -> list[float]:
+    """
+    Encode a single query string into a 384-dimensional vector using the
+    HF Serverless Inference API.
+ 
+    Why the same model as the embedder (paraphrase-multilingual-MiniLM-L12-v2):
+    Vector Search requires that the query vector and the stored document vectors
+    live in the same embedding space. If we encoded the query with a different
+    model, cosine similarity scores would be meaningless — the spaces are not
+    aligned. Using the identical model guarantees that "renewable energy" as a
+    query lands near "renewable energy" in article embeddings.
+ 
+    Why call HF API here instead of loading sentence-transformers locally:
+    The API container (FastAPI on HF Spaces) has a lean requirements.txt.
+    Loading sentence-transformers would add ~500MB of model weights to the
+    API container at startup, slowing cold starts and consuming RAM that the
+    free tier cannot spare. The HF Serverless API runs inference on HF's
+    infrastructure — the API container stays lightweight.
+ 
+    Why a dedicated function and not reusing _call_hf_api from embedder.py:
+    embedder.py lives in nlp_worker, which is a separate Docker service with
+    its own requirements.txt. Importing across service boundaries would couple
+    two independent containers at the Python level. This function is 10 lines
+    of httpx — the duplication cost is lower than the coupling cost.
+ 
+    Parameters
+    ----------
+    query:
+        Raw user query string (not pre-processed — the model handles tokenisation).
+ 
+    Returns
+    -------
+    list[float]
+        384-dimensional embedding vector.
+ 
+    Raises
+    ------
+    HTTPException 503
+        If the HF API is unreachable or returns an error.
+    """
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        raise HTTPException(
+            status_code=500,
+            detail="HF_TOKEN is not configured on the server.",
+        )
+ 
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    payload = {"inputs": [query], "options": {"wait_for_model": True}}
+
+    async with httpx.AsyncClient(timeout=_HF_TIMEOUT) as client:
+        try:
+            response = await client.post(_HF_ENCODE_URL, json=payload, headers=headers)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "HF API returned HTTP %d for query encoding: %s",
+                exc.response.status_code,
+                exc.response.text[:200],
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Embedding service unavailable (HTTP {exc.response.status_code}).",
+            )
+        except httpx.TransportError as exc:
+            logger.error("HF API network error during query encoding: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Embedding service unreachable.",
+            )
+
+    result: list[Any] = response.json()
+
+    vector = result[0]
+    if isinstance(vector[0],list):
+        n_tokens = len(vector)
+        dim = len(vector[0])
+        vector = [sum(vector[t][d] for t in range(n_tokens)) / n_tokens for d in range(dim)]
+
+    return vector  # type: ignore[return-value]
+
+async def _enconde_query_local(query: str) -> list[float]:
+    """
+    Encode a single query string into a 384-dimensional vector using the
+    local sentence-transformers model.
+
+    This function is a drop-in local replacement for the HF Serverless API version.
+    It maintains the exact same input/output signature and FastAPI exception handling,
+    while running inference locally on the CPU/GPU.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    try:
+        _embedder = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        logger.info("Modelo SentenceTransformer cargado correctamente.")
+    except Exception as exc:
+        logger.error("Error al cargar el embedder local: %s", exc)
+        _embedder = None
+
+    if _embedder is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding service unreachable.",
+        )
+
+    try:
+        # Generamos el vector delegando la carga a un hilo secundario
+        vector = await asyncio.to_thread(_embedder.encode, query)
+        
+        return vector.tolist()
+
+    except Exception as exc:
+        logger.error("Local inference error during query encoding: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding service unreachable.",
+        )
+# ---------------------------------------------------------------------------
+# GET /rag/search  — semantic retrieval endpoint
+# ---------------------------------------------------------------------------
+ 
+@app.get("/rag/search")
+async def rag_search(
+    query: str = Query(..., min_length=3, description="Natural language query"),
+    top_k: int = Query(5, ge=1, le=20, description="Number of results to return"),
+    _: None = Depends(verify_rag_key),
+) -> dict[str, Any]:
+    """
+    Encode a natural language query and retrieve the top-k most semantically
+    similar articles from CURATED using MongoDB Atlas Vector Search.
+ 
+    Why search CURATED and not CLEAN:
+    CURATED has all the fields the RCA Agent needs:
+    sentiment, intensity, topic_id, principal_subject, and main_argument.
+    CLEAN has embeddings too, but lacks the sentiment enrichment. Since
+    CURATED inherits the embedding from CLEAN (written during sentiment
+    classification), there is no need to query two collections.
+ 
+    Why $vectorSearch on CURATED and not a text index:
+    Text indexes match exact keywords. Vector Search captures semantic
+    similarity: a query "renewable energy transition" will retrieve articles
+    about "energía renovable" and "transition énergétique" because
+    paraphrase-multilingual-MiniLM-L12-v2 maps these to nearby vectors.
+    This is the core value proposition of the RAG component for Proyecto Agentes.
+ 
+    Why numCandidates = top_k * 10:
+    Atlas Vector Search with HNSW uses approximate nearest neighbour (ANN).
+    numCandidates controls the size of the candidate set before re-ranking.
+    A ratio of 10x gives recall >95% on small corpora while staying well
+    within M0 free tier limits. The MongoDB documentation recommends at least
+    10x as the minimum for reliable recall.
+ 
+    Response fields are deliberately minimal:
+    - embedding, lemmatized_tokens, entities excluded (heavy, not useful to caller)
+    - score included: lets the RCA Agent threshold results by confidence
+    - extract (200 chars) instead of full text: keeps response payload small
+ 
+    Authentication: X-RAG-Key header required (verified by Depends(verify_rag_key)).
+    """
+    from shared.db import get_db, COL_CURATED
+
+    query_vector = await _enconde_query_local(query)
+
+    db = get_db()
+    col = db[COL_CURATED]
+
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "embedding",
+                "queryVector": query_vector,
+                "numCandidates": top_k * 10,
+                "limit": top_k,
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "url": 1,
+                "title": 1,
+                "source": 1,
+                "detected_language": 1,
+                "sentiment": 1,
+                "intensity": 1,
+                "topic_id": 1,
+                "principal_subject": 1,
+                "main_argument": 1,
+                "publication_date": 1,
+                "extract": {"$substr": ["$text", 0, 200]},
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+    ]
+
+    results = await col.aggregate(pipeline).to_list(length=top_k)
+
+    logger.info(
+        "rag_search: query='%s' top_k=%d results=%d", query, top_k, len(results)
+    )
+ 
+    return {
+        "query": query,
+        "top_k": top_k,
+        "returned": len(results),
+        "results": results,
+    }
+
+# ---------------------------------------------------------------------------
+# GET /rag/topics/active — active topics endpoint
+# ---------------------------------------------------------------------------
+ 
+@app.get("/rag/topics/active")
+async def rag_topics_active(
+    days: int = Query(7, ge=1, le=90, description="Lookback window in days"),
+    _: None = Depends(verify_rag_key),
+) -> dict[str, Any]:
+    """
+    Return topics with growing frequency over the requested period, ordered
+    by linear regression slope (steepest ascent first).
+ 
+    Why linear regression slope and not simple delta (last week vs previous):
+    The master document (section 6.3) specifies 'ordered by pendiente de
+    regresión lineal'. With a 7-day window there are typically 1-2 ISO weeks
+    of data per topic, making slope == delta in practice. But with days >= 14
+    the regression is computed over 2+ weekly points, making it genuinely
+    more informative than a simple last-vs-previous comparison. The same
+    function handles both cases correctly.
+ 
+    Why this endpoint exists separately from GET /trends:
+    GET /trends is for the internal dashboard — it returns the full time series
+    for chart rendering. GET /rag/topics/active is for the Narrative Agent of
+    Proyecto Agentes — it needs only the ranked list of rising topics to
+    enrich its narrative with "topics gaining momentum in climate discourse".
+    Different consumers, different shapes.
+ 
+    Why reuse _compute_topic_trend() from agent_worker.agents:
+    The aggregation logic is identical to what the Trend Agent already does.
+    Duplicating it would create two sources of truth. The difference is the
+    post-processing: here we apply linear regression on the weekly counts,
+    /trends returns the raw time series.
+ 
+    Authentication: X-RAG-Key header required (verified by Depends(verify_rag_key)).
+    """
+    import numpy as np
+    from agent_worker.agents import _compute_topic_trend, _get_sync_db
+ 
+    loop = asyncio.get_event_loop()
+    db = await loop.run_in_executor(None, _get_sync_db)
+    topic_trends = await loop.run_in_executor(None, _compute_topic_trend, db, days)
+ 
+    # Compute linear regression slope for each topic over its weekly counts.
+    # Why numpy polyfit degree=1: fits a line y = slope*x + intercept over
+    # the (week_number, article_count) pairs. The slope is the rate of change
+    # per week. A positive slope means the topic is gaining frequency.
+    # We use week index (0, 1, 2, ...) as x to avoid large ISO week numbers
+    active_topics = []
+    for topic_id_str, weekly_data in topic_trends.items():
+        counts = [w["count"] for w in weekly_data]
+ 
+        if len(counts) == 1:
+            slope = 0.0
+        else:
+            x = np.arange(len(counts), dtype=np.float64)
+            y = np.array(counts, dtype=np.float64)
+            slope = float(np.polyfit(x, y, deg=1)[0])
+ 
+        total_count = sum(counts)
+        last_week = weekly_data[-1]
+ 
+        active_topics.append({
+            "topic_id": int(topic_id_str),
+            "slope": round(slope, 4),
+            "total_articles": total_count,
+            "avg_intensity": last_week["avg_intensity"],
+            "dominant_sentiment": last_week["dominant_sentiment"],
+            "weeks_observed": len(weekly_data),
+        })
+ 
+    # Sort by slope descending — steepest growth first.
+    active_topics.sort(key=lambda t: t["slope"], reverse=True)
+ 
+    logger.info(
+        "rag_topics_active: days=%d topics_found=%d", days, len(active_topics)
+    )
+ 
+    return {
+        "days": days,
+        "topics_count": len(active_topics),
+        "topics": active_topics,
+    }
