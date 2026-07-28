@@ -61,6 +61,8 @@ app = FastAPI(
     version="0.1.0"
 )
 
+_local_embedder: Any = None
+
 # ---------------------------------------------------------------------------
 # SSE helpers
 # ---------------------------------------------------------------------------
@@ -680,16 +682,14 @@ async def _enconde_query_local(query: str) -> list[float]:
     It maintains the exact same input/output signature and FastAPI exception handling,
     while running inference locally on the CPU/GPU.
     """
-    from sentence_transformers import SentenceTransformer
+    global _local_embedder
+    if _local_embedder is None:                  
+        from sentence_transformers import SentenceTransformer
+        _local_embedder = SentenceTransformer(
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        )
 
-    try:
-        _embedder = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-        logger.info("Modelo SentenceTransformer cargado correctamente.")
-    except Exception as exc:
-        logger.error("Error al cargar el embedder local: %s", exc)
-        _embedder = None
-
-    if _embedder is None:
+    if _local_embedder is None:
         raise HTTPException(
             status_code=503,
             detail="Embedding service unreachable.",
@@ -697,10 +697,8 @@ async def _enconde_query_local(query: str) -> list[float]:
 
     try:
         # Generamos el vector delegando la carga a un hilo secundario
-        vector = await asyncio.to_thread(_embedder.encode, query)
-        
+        vector = await asyncio.to_thread(_local_embedder.encode, query)
         return vector.tolist()
-
     except Exception as exc:
         logger.error("Local inference error during query encoding: %s", exc)
         raise HTTPException(
