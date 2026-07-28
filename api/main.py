@@ -137,8 +137,8 @@ async def _pipeline_generator() -> AsyncGenerator[str, None]:
             "step": "NLP",
             "status": "done",
             "elapsed_s": elapsed,
-            "procesados": nlp_summary.get("processed", 0),
-            "omitidos": nlp_summary.get("skipped", 0),
+            "processed": nlp_summary.get("processed", 0),
+            "skipped": nlp_summary.get("skipped", 0),
         })
     except Exception as exc:
         logger.error("NLP step failed: %s", exc, exc_info=True)
@@ -159,8 +159,8 @@ async def _pipeline_generator() -> AsyncGenerator[str, None]:
             "step": "Embeddings",
             "status": "done",
             "elapsed_s": elapsed,
-            "embebidos": emb_summary.get("embedded", 0),
-            "ya_cacheados": emb_summary.get("already_cached", 0),
+            "embedded": emb_summary.get("embedded", 0),
+            "already_cached": emb_summary.get("already_cached", 0),
         })
     except Exception as exc:
         logger.error("Embeddings step failed: %s", exc, exc_info=True)
@@ -183,8 +183,8 @@ async def _pipeline_generator() -> AsyncGenerator[str, None]:
             "step": "BERTopic",
             "status": "done",
             "elapsed_s": elapsed,
-            "asignados": topic_summary.get("assigned", 0),
-            "ruido": topic_summary.get("noise", 0),
+            "assigned": topic_summary.get("assigned", 0),
+            "noise": topic_summary.get("noise", 0),
         })
     except FileNotFoundError:
         logger.warning("BERTopic model not found — skipping assign_topics.")
@@ -367,7 +367,6 @@ async def get_articles(
     projection = {
         "embedding": 0,
         "lemmatized_tokens": 0,
-        "entities": 0,
         "_id": 0,
     }
 
