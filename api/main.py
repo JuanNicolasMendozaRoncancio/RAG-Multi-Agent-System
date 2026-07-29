@@ -291,6 +291,9 @@ async def run_pipeline() -> StreamingResponse:
         headers=headers 
     )
 
+# ---------------------------------------------------------------------------
+# GET /healh
+# ---------------------------------------------------------------------------
 @app.get("/health")
 async def health() -> dict:
     """
@@ -428,6 +431,9 @@ async def get_topics(
         "topics": topics,
     }
 
+# ---------------------------------------------------------------------------
+# GET /contradictions
+# ---------------------------------------------------------------------------
 @app.get("/contradictions")
 async def get_contradictions(
     days: int = Query(7, ge=1, le=90, description="Lookback window in days"),
@@ -467,7 +473,6 @@ async def get_contradictions(
 # ---------------------------------------------------------------------------
 # GET /trends
 # ---------------------------------------------------------------------------
- 
 @app.get("/trends")
 async def get_trends(
     days: int = Query(7, ge=1, le=90, description="Lookback window in days"),
@@ -504,7 +509,6 @@ async def get_trends(
 # ---------------------------------------------------------------------------
 # GET /summary
 # ---------------------------------------------------------------------------
- 
 @app.get("/summary")
 async def get_summary() -> dict[str, Any]:
     """
@@ -540,6 +544,56 @@ async def get_summary() -> dict[str, Any]:
         )
  
     return doc
+
+# ---------------------------------------------------------------------------
+# GET /embeddings
+# ---------------------------------------------------------------------------
+@app.get("/embeddings")
+async def get_embeddings(
+    limit: int = Query(500, ge=1, le=2000, description="Maximum number of documents to return"),
+) -> dict[str, Any]:
+    """
+    Return embeddings with minimal metadata for UMAP 2D visualization (Tab 2).
+
+    Why CURATED and not CLEAN:
+    CURATED inherits the embedding from the sentiment pipeline and already
+    carries topic_id, sentiment, source, and title — everything Tab 2 needs
+    for coloring and hover text. Querying CLEAN would be a redundant round
+    trip to a second collection for identical vectors.
+
+    Why exclude text, lemmatized_tokens, entities, main_argument:
+    Tab 2 only needs the vector (UMAP input), topic_id (point color),
+    and url/title/source/sentiment/detected_language (hover labels).
+    Full text fields would add hundreds of KB with no benefit.
+    """
+    from shared.db import get_db, COL_CURATED
+
+    db = get_db()
+    col = db[COL_CURATED]
+
+    projection = {
+        "_id": 0,
+        "url": 1,
+        "title": 1,
+        "source": 1,
+        "detected_language": 1,
+        "sentiment": 1,
+        "topic_id": 1,
+        "embedding": 1,   
+    }
+
+    cursor = col.find(
+        {"embedding": {"$exists": True}, "topic_id":{"$exists":True}}, projection
+    ).limit(limit)
+
+    docs = await cursor.to_list(length=limit)
+
+    return {
+        "total": len(docs),
+        "docs": docs,
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # Authentication dependency — inter-system endpoints (/rag/*)

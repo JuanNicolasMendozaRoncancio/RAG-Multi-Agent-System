@@ -21,6 +21,8 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
+import numpy as np
+
 load_dotenv()
 # ---------------------------------------------------------------------------
 # Configuration
@@ -713,6 +715,668 @@ def _render_tab1() -> None:
                 st.session_state.selected_article = None
                 st.rerun()   
 
+
+# ---------------------------------------------------------------------------
+# Tab 2 — Topic Map (UMAP 2D)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def _compute_umap_2d(docs_json: str) -> np.ndarray:
+    """
+    Reduce 384-dim embeddings to 2D for visualization.
+
+    Why a new UMAP with n_components=2 and not the serialized BERTopic model:
+    The BERTopic model uses UMAP with n_components=5 for clustering — those
+    5 dimensions preserve enough structure for HDBSCAN but are not human-readable.
+    This is a separate reduction whose only job is to produce X/Y coordinates
+    for a scatter plot. Two different objectives, two different UMAP instances.
+
+    Why @st.cache_data with ttl=3600:
+    UMAP over 222 x 384 arrays takes ~2-3s. Without caching it re-runs on every
+    sidebar interaction. ttl=3600 is coherent with the nightly pipeline cadence.
+
+    Why accept docs_json (str) and not a list:
+    st.cache_data hashes the arguments. numpy arrays and lists are unhashable
+    or change hash on every call. Serializing to JSON string gives a stable,
+    hashable cache key.
+    """
+    import json
+    from umap import UMAP
+
+    docs = json.loads(docs_json)
+    embeddings = np.array([d["embedding"] for d in docs], dtype=np.float32)
+
+    reducer = UMAP(
+        n_components=2,
+        n_neighbors=10,
+        metric="cosine",
+        random_state=42,
+        low_memory=False,
+    )
+    return reducer.fit_transform(embeddings)
+
+
+def _render_tab2() -> None:
+    """
+    Render Tab 2: interactive UMAP 2D scatter plot of BERTopic topics.
+
+    Data flow:
+      GET /embeddings → 222 docs with embedding + topic_id + metadata
+      → UMAP 384D→2D (cached) → Plotly scatter colored by topic_id
+    """
+    import json
+    import numpy as np
+    import plotly.graph_objects as go
+
+    st.markdown("## Topic Map")
+    st.caption(
+        "Each point is an article projected into 2D with UMAP. "
+        "Color = BERTopic topic. Noise articles (topic -1) shown in grey."
+    )
+
+    data = _api_get("/embeddings")
+    if data is None:
+        return
+
+    docs = data.get("docs", [])
+    if not docs:
+        st.info("No articles with embeddings found. Run the pipeline first.")
+        return
+
+    # Language filter — applied before UMAP so the map reflects the filtered corpus
+    languages = sorted({d.get("detected_language", "?") for d in docs})
+    lang_options = ["All"] + languages
+    selected_lang = st.selectbox(
+        "Filter by language", lang_options, key="tab2_lang"
+    )
+    if selected_lang != "All":
+        docs = [d for d in docs if d.get("detected_language") == selected_lang]
+
+    if len(docs) < 5:
+        st.warning("Too few articles to compute UMAP (minimum 5). Adjust the language filter.")
+        return
+
+    # Cache key: JSON string of (url, topic_id, language) tuples — stable and hashable
+    # We do NOT include the full embedding in the cache key (too large).
+    # Instead we use a fingerprint: sorted urls + selected_lang.
+    fingerprint = json.dumps(
+        {"lang": selected_lang, "urls": sorted(d["url"] for d in docs)}
+    )
+    coords_2d = _compute_umap_2d(json.dumps(docs))
+
+    # Build arrays for Plotly
+    x = coords_2d[:, 0].tolist()
+    y = coords_2d[:, 1].tolist()
+
+    topic_ids = [d.get("topic_id", -1) for d in docs]
+    unique_topics = sorted(set(topic_ids))
+
+    # Color palette: teal family for real topics, grey for noise (-1)
+    # Using a discrete palette so topic IDs map consistently across filter changes
+    _TOPIC_COLORS = [
+        "#2dd4bf", "#0d9488", "#f59e0b", "#8b5cf6",
+        "#ec4899", "#3b82f6", "#10b981", "#f97316",
+        "#a78bfa", "#34d399",
+    ]
+
+    fig = go.Figure()
+
+    for topic_id in unique_topics:
+        mask = [i for i, t in enumerate(topic_ids) if t == topic_id]
+        color = (
+            "#475569"  # slate for noise
+            if topic_id == -1
+            else _TOPIC_COLORS[topic_id % len(_TOPIC_COLORS)]
+        )
+        label = "Noise" if topic_id == -1 else f"Topic {topic_id}"
+
+        fig.add_trace(go.Scatter(
+            x=[x[i] for i in mask],
+            y=[y[i] for i in mask],
+            mode="markers",
+            name=label,
+            marker=dict(
+                color=color,
+                size=7,
+                opacity=0.85,
+                line=dict(width=0.5, color="#0f172a"),
+            ),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Source: %{customdata[1]}<br>"
+                "Sentiment: %{customdata[2]}<br>"
+                "Lang: %{customdata[3]}<br>"
+                "<extra></extra>"
+            ),
+            customdata=[
+                [
+                    (docs[i].get("title") or "Untitled")[:60],
+                    docs[i].get("source", "?"),
+                    docs[i].get("sentiment", "?"),
+                    docs[i].get("detected_language", "?"),
+                ]
+                for i in mask
+            ],
+        ))
+
+    fig.update_layout(
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#1e293b",
+        font=dict(color="#e2e8f0", family="JetBrains Mono, monospace"),
+        legend=dict(
+            bgcolor="#1e293b",
+            bordercolor="#334155",
+            borderwidth=1,
+            font=dict(size=11),
+        ),
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=550,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Topic keyword reference below the chart
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("#### Topic keywords (from BERTopic model)")
+    st.caption("Keywords extracted by c-TF-IDF from the trained BERTopic model.")
+
+    try:
+        import joblib
+        from pathlib import Path
+        model = joblib.load(Path(__file__).parent.parent / "models" / "bertopic_model.joblib")
+        real_topics = [t for t in unique_topics if t != -1]
+        if real_topics:
+            cols = st.columns(len(real_topics))
+            for col, tid in zip(cols, real_topics):
+                words_scores = model.get_topic(tid)
+                if words_scores:
+                    keywords = ", ".join(w for w, _ in words_scores[:6])
+                    color = _TOPIC_COLORS[tid % len(_TOPIC_COLORS)]
+                    col.markdown(
+                        f'<div style="border-left: 3px solid {color}; padding-left: 8px;">'
+                        f'<span style="color:{color}; font-family: JetBrains Mono, monospace; '
+                        f'font-size:0.75rem; font-weight:600;">TOPIC {tid}</span><br>'
+                        f'<span style="font-size:0.78rem; color:#94a3b8;">{keywords}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+    except FileNotFoundError:
+        st.caption("BERTopic model not found at models/bertopic_model.joblib — keywords unavailable.")
+
+# ---------------------------------------------------------------------------
+# Tab 3 — Contradiction Explorer (PyVis network)
+# ---------------------------------------------------------------------------
+def _render_tab3() -> None:
+    """
+    Render Tab 3: network graph of semantically similar articles with
+    opposing sentiment, plus side-by-side article comparison.
+
+    Data flow:
+      GET /contradictions?days={d}&threshold={t}&max_pairs={n}
+      → PyVis network rendered via st.components.v1.html()
+      → click on edge label → side-by-side article detail
+    """
+    import json
+    from pyvis.network import Network
+
+    st.markdown("## Contradiction Explorer")
+    st.caption(
+        "Articles covering the same topic but with opposing sentiment. "
+        "Edge thickness = cosine similarity. Green = positive, Red = negative."
+    )
+
+    col_days, col_thresh, col_pairs = st.columns(3)
+    with col_days:
+        days = st.slider("Lookback (days)", 1, 90, 30, key="tab3_days")
+    with col_thresh:
+        threshold = st.slider("Min similarity", 0.0, 1.0, 0.65, step=0.05, key="tab3_thresh")
+    with col_pairs:
+        max_pairs = st.slider("Max pairs", 1, 20, 5, key="tab3_pairs")
+
+    data = _api_get(
+        "/contradictions",
+        params={"days": days, "threshold": threshold, "max_pairs": max_pairs},
+    )
+    if data is None:
+        return
+
+    pairs = data.get("pairs", [])
+
+    if not pairs:
+        st.info(
+            f"No contradictions found above similarity {threshold} in the last {days} days. "
+            "Try lowering the threshold or increasing the lookback window."
+        )
+        return
+
+    st.markdown(
+        f'<span class="mono" style="color:#64748b;">'
+        f"{len(pairs)} contradiction pair(s) found"
+        f"</span>",
+        unsafe_allow_html=True,
+    )
+
+    # Build PyVis network
+    # Why bgcolor and font_color matching the dashboard dark theme:
+    # PyVis renders inside an iframe — it has its own CSS context, so we
+    # must pass the palette explicitly rather than inheriting from the parent.
+    net = Network(
+        height="450px",
+        width="100%",
+        bgcolor="#1e293b",
+        font_color="#1e293b",
+    )
+    net.barnes_hut(gravity=-8000, central_gravity=0.3, spring_length=120)
+
+    seen_nodes: set[str] = set()
+
+    for pair in pairs:
+        neg = pair["negative_article"]
+        pos = pair["positive_article"]
+        similarity = pair["cosine_similarity"]
+
+        neg_id = neg["url"]
+        pos_id = pos["url"]
+
+        neg_label = (neg.get("title") or neg["url"])[:35]
+        pos_label = (pos.get("title") or pos["url"])[:35]
+
+        if neg_id not in seen_nodes:
+            net.add_node(
+                neg_id,
+                label=neg_label,
+                color="#b91c1c",   # red-700 — negative sentiment
+                title=f"[NEGATIVE] {neg.get('source','?')}\n{neg.get('subject','')}",
+                size=18,
+            )
+            seen_nodes.add(neg_id)
+
+        if pos_id not in seen_nodes:
+            net.add_node(
+                pos_id,
+                label=pos_label,
+                color="#0f766e",   # teal-700 — positive sentiment
+                title=f"[POSITIVE] {pos.get('source','?')}\n{pos.get('subject','')}",
+                size=18,
+            )
+            seen_nodes.add(pos_id)
+
+        # Edge width proportional to cosine similarity (range 1–8px)
+        edge_width = round(1 + similarity * 5, 1)
+        net.add_edge(
+            neg_id,
+            pos_id,
+            value=edge_width,
+            title=f"Similarity: {similarity:.2f}",
+            color="#2dd4bf",
+        )
+
+    # Disable the PyVis control panel — it adds visual noise with no benefit
+    # at this corpus size
+    net.set_options(json.dumps({
+        "interaction": {"hover": True, "tooltipDelay": 100},
+        "physics": {"enabled": True},
+        "edges": {"smooth": {"type": "dynamic"}},
+    }))
+
+    html_str = net.generate_html()
+    st.components.v1.html(html_str, height=470, scrolling=False)
+
+    # Side-by-side article comparison
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("#### Contradiction pairs — detail")
+
+    for i, pair in enumerate(pairs):
+        neg = pair["negative_article"]
+        pos = pair["positive_article"]
+        similarity = pair["cosine_similarity"]
+
+        st.markdown(
+            f'<span class="mono" style="color:#64748b;">pair {i+1} · similarity {similarity:.2f}</span>',
+            unsafe_allow_html=True,
+        )
+
+        col_neg, col_pos = st.columns(2)
+
+        with col_neg:
+            st.markdown(
+                f'<div class="article-card">'
+                f'<div class="article-meta">'
+                f'<span class="badge badge-negative">negative</span>'
+                f'<span class="badge badge-source">{neg.get("source","?").replace("_"," ")}</span>'
+                f'</div>'
+                f'<div class="article-title">{neg.get("title","Untitled")}</div>'
+                f'<div class="article-subject">{neg.get("subject","")}</div>'
+                f'<a href="{neg["url"]}" target="_blank" '
+                f'style="font-size:0.75rem;color:#2dd4bf;">↗ Read article</a>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with col_pos:
+            st.markdown(
+                f'<div class="article-card">'
+                f'<div class="article-meta">'
+                f'<span class="badge badge-positive">positive</span>'
+                f'<span class="badge badge-source">{pos.get("source","?").replace("_"," ")}</span>'
+                f'</div>'
+                f'<div class="article-title">{pos.get("title","Untitled")}</div>'
+                f'<div class="article-subject">{pos.get("subject","")}</div>'
+                f'<div class="article-extract">{pos.get("main_argument","")}</div>'
+                f'<a href="{pos["url"]}" target="_blank" '
+                f'style="font-size:0.75rem;color:#2dd4bf;">↗ Read article</a>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("")
+
+
+# ---------------------------------------------------------------------------
+# Tab 4 — Trends & Narrative Summary
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=1800)
+def _fetch_all_articles_for_trends() -> list[dict]:
+    """
+    Fetch all articles from CURATED for client-side sentiment aggregation.
+
+    Why cache with ttl=1800 (30 min) and not ttl=3600:
+    The sentiment chart aggregates by source and week — if the pipeline runs
+    mid-session the chart should refresh within 30 minutes, not an hour.
+
+    Why a standalone cached function and not calling _api_get() directly:
+    _api_get() is not cacheable by st.cache_data because it references the
+    st module internally (st.error). This wrapper isolates the HTTP call so
+    the cache key is just the function identity + no args.
+    """
+    import requests
+    try:
+        resp = requests.get(
+            f"{API_BASE_URL}/articles",
+            params={"limit": 100, "skip": 0},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json().get("articles", [])
+    except Exception:
+        return []
+
+
+def _render_tab4() -> None:
+    """
+    Render Tab 4: topic frequency trends (bar chart) + sentiment evolution
+    (line chart) + latest narrative summary card.
+
+    Data flow:
+      GET /trends?days={d}     → grouped bar chart (topic frequency by week)
+      GET /articles?limit=500  → line chart (sentiment ratio by source over time)
+      GET /summary             → narrative summary card
+    """
+    import plotly.graph_objects as go
+    from collections import defaultdict
+
+    st.markdown("## Trends & Narrative Summary")
+    st.caption(
+        "Topic frequency evolution, sentiment distribution by source, "
+        "and the latest narrative generated by the Synthesis Agent."
+    )
+
+    # Temporal window selector — shared across all charts in this tab
+    days = st.select_slider(
+        "Analysis window",
+        options=[7, 14, 30, 60, 90],
+        value=30,
+        key="tab4_days",
+        format_func=lambda d: f"{d} days",
+    )
+
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+
+    # ── Chart 1: Topic frequency by ISO week ────────────────────────────
+    st.markdown("#### Topic frequency by week")
+
+    trends_data = _api_get("/trends", params={"days": days})
+
+    if trends_data:
+        topic_trends = trends_data.get("topic_trends", {})
+        rising = trends_data.get("rising_topics", [])
+
+        if rising:
+            rising_str = ", ".join(f"Topic {t}" for t in rising)
+            st.markdown(
+                f'<span class="mono" style="color:#2dd4bf;">↑ Rising: {rising_str}</span>',
+                unsafe_allow_html=True,
+            )
+
+        if topic_trends:
+            # Collect all unique ISO weeks across all topics
+            all_weeks: list[int] = sorted({
+                w["week"]
+                for weekly_data in topic_trends.values()
+                for w in weekly_data
+            })
+
+            _TOPIC_COLORS = [
+                "#2dd4bf", "#0d9488", "#f59e0b", "#8b5cf6",
+                "#ec4899", "#3b82f6", "#10b981", "#f97316",
+            ]
+
+            fig_freq = go.Figure()
+
+            for topic_id_str, weekly_data in sorted(topic_trends.items()):
+                tid = int(topic_id_str)
+                week_to_count = {w["week"]: w["count"] for w in weekly_data}
+                counts = [week_to_count.get(wk, 0) for wk in all_weeks]
+                color = _TOPIC_COLORS[tid % len(_TOPIC_COLORS)]
+
+                fig_freq.add_trace(go.Bar(
+                    name=f"Topic {tid}",
+                    x=[f"W{wk}" for wk in all_weeks],
+                    y=counts,
+                    marker_color=color,
+                    opacity=0.85,
+                ))
+
+            fig_freq.update_layout(
+                barmode="group",
+                paper_bgcolor="#0f172a",
+                plot_bgcolor="#1e293b",
+                font=dict(color="#e2e8f0", family="JetBrains Mono, monospace"),
+                legend=dict(bgcolor="#1e293b", bordercolor="#334155", borderwidth=1),
+                margin=dict(l=20, r=20, t=10, b=20),
+                height=320,
+                xaxis=dict(gridcolor="#334155"),
+                yaxis=dict(gridcolor="#334155", title="Articles"),
+            )
+
+            st.plotly_chart(fig_freq, use_container_width=True)
+        else:
+            st.info("No topic trend data for this period.")
+    else:
+        st.warning("Could not load trend data.")
+
+    # ── Chart 2: Sentiment ratio by source over time ─────────────────────
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("#### Sentiment ratio by source")
+    st.caption("Fraction of negative articles per source over the selected period.")
+
+    articles = _fetch_all_articles_for_trends()
+
+    if articles:
+        from datetime import datetime, timezone, timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        # Filter by period and group by (source, ISO week, sentiment)
+        # Why ISO week: consistent with /trends endpoint granularity
+        weekly_neg: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        weekly_total: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        all_sources: set[str] = set()
+
+        for art in articles:
+            ingestion_str = art.get("ingestion_date", "")
+            try:
+                ingestion_dt = datetime.fromisoformat(
+                    ingestion_str.replace("Z", "+00:00")
+                )
+            except (ValueError, AttributeError):
+                continue
+
+            if ingestion_dt < cutoff:
+                continue
+
+            source = art.get("source", "unknown")
+            week = ingestion_dt.isocalendar()[1]
+            sentiment = art.get("sentiment", "neutral")
+
+            all_sources.add(source)
+            weekly_total[source][week] += 1
+            if sentiment == "negative":
+                weekly_neg[source][week] += 1
+
+        all_weeks_sent: list[int] = sorted({
+            wk
+            for src_data in weekly_total.values()
+            for wk in src_data.keys()
+        })
+
+        _SOURCE_COLORS = [
+            "#2dd4bf", "#f59e0b", "#8b5cf6",
+            "#ec4899", "#3b82f6", "#f97316", "#10b981",
+        ]
+
+        fig_sent = go.Figure()
+
+        for i, source in enumerate(sorted(all_sources)):
+            ratios = []
+            for wk in all_weeks_sent:
+                total = weekly_total[source].get(wk, 0)
+                neg = weekly_neg[source].get(wk, 0)
+                ratios.append(round(neg / total, 2) if total > 0 else None)
+
+            fig_sent.add_trace(go.Scatter(
+                name=source.replace("_", " "),
+                x=[f"W{wk}" for wk in all_weeks_sent],
+                y=ratios,
+                mode="lines+markers",
+                line=dict(color=_SOURCE_COLORS[i % len(_SOURCE_COLORS)], width=2),
+                marker=dict(size=6),
+                connectgaps=False,  # gaps where source had no articles that week
+            ))
+
+        fig_sent.update_layout(
+            paper_bgcolor="#0f172a",
+            plot_bgcolor="#1e293b",
+            font=dict(color="#e2e8f0", family="JetBrains Mono, monospace"),
+            legend=dict(bgcolor="#1e293b", bordercolor="#334155", borderwidth=1),
+            margin=dict(l=20, r=20, t=10, b=20),
+            height=320,
+            xaxis=dict(gridcolor="#334155"),
+            yaxis=dict(
+                gridcolor="#334155",
+                title="Negative ratio",
+                range=[0, 1],
+                tickformat=".0%",
+            ),
+        )
+
+        st.plotly_chart(fig_sent, use_container_width=True)
+    else:
+        st.info("No article data available for sentiment chart.")
+
+    # ── Narrative summary card ────────────────────────────────────────────
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("#### Latest narrative summary")
+    st.caption("Generated by the Synthesis Agent. Run the pipeline to refresh.")
+
+    summary_data = _api_get("/summary")
+
+    if summary_data is None:
+        st.info("No summary yet. Run POST /pipeline/run first.")
+        return
+
+    provider = summary_data.get("llm_provider", "groq")
+    timestamp = summary_data.get("timestamp", "")
+    period = summary_data.get("period_days", "?")
+    text = summary_data.get("text", "")
+    insights = summary_data.get("analytical_insights", [])
+    contradiction_count = summary_data.get("contradiction_count", 0)
+    rising = summary_data.get("rising_topics", [])
+
+    provider_icon = "⚡" if provider == "groq" else "✦"
+    provider_label = "Groq LPU" if provider == "groq" else "Gemini Flash"
+
+    # Metadata row
+    col_ts, col_prov, col_period = st.columns(3)
+    with col_ts:
+        ts_display = timestamp[:10] if timestamp else "—"
+        st.markdown(
+            f'<div class="metric-card">'
+            f'<div class="metric-value" style="font-size:1.1rem;">{ts_display}</div>'
+            f'<div class="metric-label">Generated</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with col_prov:
+        st.markdown(
+            f'<div class="metric-card">'
+            f'<div class="metric-value" style="font-size:1.1rem;">{provider_icon} {provider_label}</div>'
+            f'<div class="metric-label">LLM Provider</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    with col_period:
+        st.markdown(
+            f'<div class="metric-card">'
+            f'<div class="metric-value" style="font-size:1.1rem;">{period}d</div>'
+            f'<div class="metric-label">Period analyzed</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")
+
+    # Summary text
+    st.markdown(
+        f'<div class="article-card" style="border-color:#2dd4bf33;">'
+        f'<div style="font-size:0.88rem; line-height:1.7; color:#cbd5e1;">{text}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Supporting stats below the text
+    if insights or contradiction_count or rising:
+        st.markdown("")
+        col_ins, col_con, col_ris = st.columns(3)
+        with col_ins:
+            st.markdown(
+                f'<div class="metric-card">'
+                f'<div class="metric-value">{len(insights)}</div>'
+                f'<div class="metric-label">Insights generated</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with col_con:
+            st.markdown(
+                f'<div class="metric-card">'
+                f'<div class="metric-value">{contradiction_count}</div>'
+                f'<div class="metric-label">Contradictions found</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with col_ris:
+            rising_display = ", ".join(str(t) for t in rising) if rising else "—"
+            st.markdown(
+                f'<div class="metric-card">'
+                f'<div class="metric-value" style="font-size:1rem;">{rising_display}</div>'
+                f'<div class="metric-label">Rising topics</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+
 # ---------------------------------------------------------------------------
 # Main — tab layout
 # ---------------------------------------------------------------------------
@@ -720,24 +1384,25 @@ def main() -> None:
     _render_sidebar()
  
     tab1, tab2, tab3, tab4 = st.tabs([
-        "🚀 Pipeline & Feed",
-        "🗺 Topic Map",
-        "⚡ Contradictions",
-        "📈 Trends & Summary",
+        "Pipeline & Feed",
+        "Topic Map",
+        "Contradictions",
+        "Trends & Summary",
     ])
  
     with tab1:
         _render_tab1()
  
     with tab2:
-        st.info("Tab 2 — UMAP 2D topic map. Implemented in Step 15.")
+        _render_tab2()
  
     with tab3:
-        st.info("Tab 3 — Contradiction network (PyVis). Implemented in Step 15.")
+        _render_tab3()
  
     with tab4:
-        st.info("Tab 4 — Trends & narrative summary. Implemented in Step 15.")
+        _render_tab4()
  
- 
+
+
 if __name__ == "__main__":
     main()
