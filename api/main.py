@@ -155,6 +155,7 @@ async def _pipeline_generator() -> AsyncGenerator[str, None]:
     try:
         from nlp_worker.embedder import embed_articles_local, embed_articles
         emb_summary = await embed_articles_local()
+        elapsed = round(time.perf_counter() - t0, 2)
         yield _sse({
             "step": "Embeddings",
             "status": "done",
