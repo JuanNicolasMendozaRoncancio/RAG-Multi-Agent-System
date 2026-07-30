@@ -1,0 +1,15 @@
+# Ignorar entornos virtuales de Python
+venv/
+env/
+.venv/
+.env/
+
+# Ignorar la carpeta de control de versiones de Git
+.git/
+
+# Ignorar archivos de caché
+**/__pycache__/
+**/*.pyc
+
+# Ignorar el propio archivo de configuración (opcional)
+.gcloudignore

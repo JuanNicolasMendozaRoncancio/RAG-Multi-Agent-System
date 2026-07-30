@@ -231,7 +231,9 @@ def analytical_agent(state: AgentState) -> AgentState:
         by_source = _query_by_source(db, days)
         by_language = _query_by_language(db, days)
         by_topic = _query_by_topic(db, days)
- 
+
+        total_articles = sum(v["count"] for v in by_source.values())
+
         prompt = f"""You are a climate and energy journalism analyst.
         Based on the following aggregated statistics from the last {days} days, produce 3-5 concise insights.
         Each insight must be a single sentence that identifies a notable pattern, trend, or anomaly.
@@ -245,7 +247,7 @@ def analytical_agent(state: AgentState) -> AgentState:
         "insights": ["insight 1", "insight 2", "insight 3"],
         "most_active_source": "source_name",
         "dominant_sentiment_overall": "positive|negative|neutral",
-        "total_articles_analyzed": <integer>
+        "total_articles_analyzed": {total_articles}
         }}"""
  
         response = chat_complete(

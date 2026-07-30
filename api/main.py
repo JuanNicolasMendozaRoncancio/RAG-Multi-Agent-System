@@ -106,7 +106,7 @@ async def _pipeline_generator() -> AsyncGenerator[str, None]:
     # ------------------------------------------------------------------
     # Step 1: Ingesta
     # ------------------------------------------------------------------
-    yield _sse({"step":"Ingestion","Status":"running"})
+    yield _sse({"step":"Ingestion","status":"running"})
     t0 = time.perf_counter()
     try:
         from nlp_worker.ingest import run_ingestion

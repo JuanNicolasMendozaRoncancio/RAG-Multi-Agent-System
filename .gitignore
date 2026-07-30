@@ -5,3 +5,9 @@ estructura.txt
 .gitigonre
 
 .env
+
+Dockerfile
+
+.dockerignore
+
+.cloudignore

@@ -87,7 +87,7 @@ _HDBSCAN_PARAMS: dict[str, Any] = {
     "min_cluster_size": 10,
     "metric": "euclidean",     
     "cluster_selection_method": "eom",   
-    "prediction_data": True, 
+    "prediction_data": True,
 }
 
 # ---------------------------------------------------------------------------
