@@ -415,7 +415,7 @@ async def get_topics(
     loop = asyncio.get_event_loop()
     db = await loop.run_in_executor(None, _get_sync_db)
     by_topic = await loop.run_in_executor(None, _query_by_topic, db, days)
-    
+
     topic_keywords: dict[int, list[str]] = {}
     try:
         model_path = Path("models/bertopic_model.joblib")
@@ -438,6 +438,7 @@ async def get_topics(
             "relative_frequency": round(stats["count"] / total_articles, 4) if total_articles else 0.0,
             "avg_intensity": stats["avg_intensity"],
             "dominant_sentiment": stats["dominant_sentiment"],
+            "keywords": topic_keywords.get(tid, []),
         })
  
     return {
