@@ -1,0 +1,50 @@
+name: Nightly RAG Maintenance
+
+on:
+  # Runs every night at 03:00 UTC
+
+  schedule:
+    - cron: "0 3 * * *"
+
+  # Manual trigger.
+  workflow_dispatch:
+
+jobs:
+  nightly-maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Why cache pip dependencies:
+      # spaCy, trafilatura, and feedparser total ~200MB of downloads.
+      # Caching cuts the setup time from ~3min to ~20s on cache hit.
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: |
+            nlp_worker/requirements.txt
+            shared/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r shared/requirements.txt
+          pip install -r nlp_worker/requirements.txt
+          pip install prefect python-dotenv
+
+      # Why download spaCy models as a separate step:
+      - name: Download spaCy models
+        run: |
+          python -m spacy download es_core_news_md
+          python -m spacy download en_core_web_md
+          python -m spacy download fr_core_news_md
+
+      - name: Run nightly maintenance flow
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: python prefect_flow.py
