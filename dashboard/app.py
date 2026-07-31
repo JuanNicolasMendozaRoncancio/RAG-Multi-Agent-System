@@ -27,7 +27,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://rag-climate-api-1024198341439.us-central1.run.app")
  
 # Sentiment badge colors: these map to CSS background colors injected via
 # st.markdown. Using teal/red/slate keeps the palette coherent with the
