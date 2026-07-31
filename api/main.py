@@ -419,10 +419,14 @@ async def get_topics(
     topic_keywords: dict[int, list[str]] = {}
     try:
         model_path = Path("models/bertopic_model.joblib")
+        logger.info("CWD: %s", Path.cwd())
+        logger.info("model_path absolute: %s", model_path.resolve())
+        logger.info("model_path exists: %s", model_path.exists())
         if model_path.exists():
             model = joblib.load(model_path)
             for tid in by_topic:
                 words_scores = model.get_topic(int(tid))
+                logger.info("topic %s words_scores: %s", tid, words_scores)
                 if words_scores:
                     topic_keywords[int(tid)] = [w for w, _ in words_scores[:6]]
     except Exception as exc:
@@ -432,13 +436,14 @@ async def get_topics(
 
     topics = []
     for topic_id_str, stats in sorted(by_topic.items(), key = lambda x:x[1]["count"], reverse= True):
+        current_tid = int(topic_id_str)
         topics.append({
             "topic_id": int(topic_id_str),
             "count": stats["count"],
             "relative_frequency": round(stats["count"] / total_articles, 4) if total_articles else 0.0,
             "avg_intensity": stats["avg_intensity"],
             "dominant_sentiment": stats["dominant_sentiment"],
-            "keywords": topic_keywords.get(tid, []),
+            "keywords": topic_keywords.get(current_tid, []),
         })
  
     return {
