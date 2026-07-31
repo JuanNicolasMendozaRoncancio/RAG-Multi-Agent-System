@@ -813,9 +813,14 @@ def _render_tab2() -> None:
     # Color palette: teal family for real topics, grey for noise (-1)
     # Using a discrete palette so topic IDs map consistently across filter changes
     _TOPIC_COLORS = [
-        "#2dd4bf", "#0d9488", "#f59e0b", "#8b5cf6",
-        "#ec4899", "#3b82f6", "#10b981", "#f97316",
-        "#a78bfa", "#34d399",
+        "#2dd4bf",  # teal   — topic 0
+        "#f59e0b",  # amber  — topic 1
+        "#8b5cf6",  # violet — topic 2
+        "#ec4899",  # pink   — topic 3
+        "#3b82f6",  # blue   — topic 4
+        "#10b981",  # emerald— topic 5
+        "#f97316",  # orange — topic 6
+        "#a78bfa",  # lavender—topic 7
     ]
 
     fig = go.Figure()
@@ -882,18 +887,21 @@ def _render_tab2() -> None:
     st.caption("Keywords extracted by c-TF-IDF from the trained BERTopic model.")
 
     try:
-        import joblib
-        from pathlib import Path
-        model = joblib.load(Path(__file__).parent.parent / "models" / "bertopic_model.joblib")
+        topics_data = _api_get("/topics", params={"days": 90})
+        keywords_by_topic: dict[int, str] = {}
+        if topics_data:
+            for t in topics_data.get("topics", []):
+                kws = t.get("keywords", [])
+                if kws:
+                    keywords_by_topic[t["topic_id"]] = ", ".join(kws)
+
         real_topics = [t for t in unique_topics if t != -1]
         if real_topics:
             cols = st.columns(len(real_topics))
             for col, tid in zip(cols, real_topics):
-                words_scores = model.get_topic(tid)
-                if words_scores:
-                    keywords = ", ".join(w for w, _ in words_scores[:6])
-                    color = _TOPIC_COLORS[tid % len(_TOPIC_COLORS)]
-                    col.markdown(
+                keywords = keywords_by_topic.get(tid, "")
+                color = _TOPIC_COLORS[tid % len(_TOPIC_COLORS)]
+                col.markdown(
                         f'<div style="border-left: 3px solid {color}; padding-left: 8px;">'
                         f'<span style="color:{color}; font-family: JetBrains Mono, monospace; '
                         f'font-size:0.75rem; font-weight:600;">TOPIC {tid}</span><br>'
@@ -1159,8 +1167,14 @@ def _render_tab4() -> None:
             })
 
             _TOPIC_COLORS = [
-                "#2dd4bf", "#0d9488", "#f59e0b", "#8b5cf6",
-                "#ec4899", "#3b82f6", "#10b981", "#f97316",
+                "#2dd4bf",  # teal   — topic 0
+                "#f59e0b",  # amber  — topic 1
+                "#8b5cf6",  # violet — topic 2
+                "#ec4899",  # pink   — topic 3
+                "#3b82f6",  # blue   — topic 4
+                "#10b981",  # emerald— topic 5
+                "#f97316",  # orange — topic 6
+                "#a78bfa",  # lavender—topic 7
             ]
 
             fig_freq = go.Figure()

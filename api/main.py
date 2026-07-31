@@ -409,10 +409,24 @@ async def get_topics(
     running synchronous blocking code without blocking the event loop.
     """
     from agent_worker.agents import _query_by_topic, _get_sync_db
+    import joblib
+    from pathlib import Path
 
     loop = asyncio.get_event_loop()
     db = await loop.run_in_executor(None, _get_sync_db)
     by_topic = await loop.run_in_executor(None, _query_by_topic, db, days)
+    
+    topic_keywords: dict[int, list[str]] = {}
+    try:
+        model_path = Path("models/bertopic_model.joblib")
+        if model_path.exists():
+            model = joblib.load(model_path)
+            for tid in by_topic:
+                words_scores = model.get_topic(int(tid))
+                if words_scores:
+                    topic_keywords[int(tid)] = [w for w, _ in words_scores[:6]]
+    except Exception as exc:
+        logger.warning("Could not load BERTopic model for keywords: %s", exc)
 
     total_articles = sum(v["count"] for v in by_topic.values())
 
