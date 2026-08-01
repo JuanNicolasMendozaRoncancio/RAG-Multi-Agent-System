@@ -14,12 +14,16 @@
 [![Nightly](https://img.shields.io/github/actions/workflow/status/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System/nightly.yml?label=nightly&logo=github)](https://github.com/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
 [![Free Tier](https://img.shields.io/badge/infrastructure-100%25_free_tier-22c55e?style=flat)](#infrastructure)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://rag-multi-agent-system-qtfstwhfosn7qfntzr5fvg.streamlit.app)
 
 **Multilingual RAG pipeline (ES/EN/FR) with multi-agent analysis over climate and energy journalism.**
 
 Ingests 6 RSS sources → NLP enrichment → multilingual embeddings → BERTopic clustering → LLM sentiment classification → 4-agent LangGraph system → live Streamlit dashboard with SSE streaming.
 
 [Architecture](#architecture) · [Quick Start](#quick-start) · [API Reference](#api-reference) · [Inter-System Integration](#inter-system-integration) · [Tests](#tests) · [Infrastructure](#infrastructure)
+<a href="https://rag-multi-agent-system-qtfstwhfosn7qfntzr5fvg.streamlit.app">
+  <img src="https://img.shields.io/badge/🌍_Open_Live_Dashboard-Click_here-2dd4bf?style=for-the-badge" alt="Live Dashboard"/>
+</a>
 
 </div>
 
@@ -57,7 +61,7 @@ Live Dashboard (4 tabs)
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        DATA LAYER — MongoDB Atlas M0                        │
 │                                                                             │
-│   RAW ──────► CLEAN ─────────────────────► CURATED ──────► SUMMARIES       │
+│   RAW ──────► CLEAN ─────────────────────► CURATED ──────► SUMMARIES        │
 │   (sha256)   (lemmas, NER, embedding,       (sentiment,     (narrative)     │
 │              topic_id)                      intensity,                      │
 │                                             subject, arg)                   │
@@ -66,27 +70,27 @@ Live Dashboard (4 tabs)
 ┌────────────────────────────────┼────────────────────────────────────────────┐
 │                        NLP WORKER                                           │
 │                                                                             │
-│  feed_reader.py ──► scraper.py ──► pipeline.py ──► embedder.py             │
-│  (feedparser)       (trafilatura)  (spaCy ×3      (HF Serverless API       │
+│  feed_reader.py ──► scraper.py ──► pipeline.py ──► embedder.py              │
+│  (feedparser)       (trafilatura)  (spaCy ×3      (HF Serverless API        │
 │                                    langdetect)     384-dim vectors)         │
 │                                        │                                    │
-│                                  topic_modeler.py ──► sentiment.py         │
-│                                  (BERTopic +          (Groq → Gemini       │
-│                                   UMAP + HDBSCAN)      fallback, JSON)     │
+│                                  topic_modeler.py ──► sentiment.py          │
+│                                  (BERTopic +          (Groq → Gemini        │
+│                                   UMAP + HDBSCAN)      fallback, JSON)      │
 └────────────────────────────────┬────────────────────────────────────────────┘
                                  │
 ┌────────────────────────────────┼────────────────────────────────────────────┐
 │                        AGENT WORKER (LangGraph)                             │
 │                                                                             │
-│  analytical_agent ──► contradiction_agent ──► trend_agent ──► synthesis    │
+│  analytical_agent ──► contradiction_agent ──► trend_agent ──► synthesis     │
 │  (MongoDB agg by      (Atlas Vector Search    (ISO-week      (narrative     │
-│   source/lang/topic)   CURATED ↔ CURATED)     regression)    → SUMMARIES)  │
+│   source/lang/topic)   CURATED ↔ CURATED)     regression)    → SUMMARIES)   │
 └────────────────────────────────┬────────────────────────────────────────────┘
                                  │ asyncio.run_in_executor
 ┌────────────────────────────────┼────────────────────────────────────────────┐
 │                        FASTAPI  (port 8000)                                 │
 │                                                                             │
-│  POST /pipeline/run  (SSE streaming, 6 steps)                              │
+│  POST /pipeline/run  (SSE streaming, 6 steps)                               │
 │  GET  /health        /articles   /topics    /contradictions                 │
 │       /trends        /summary    /embeddings                                │
 │                                                                             │
@@ -98,7 +102,7 @@ Live Dashboard (4 tabs)
 ┌────────────────────────────────┼────────────────────────────────────────────┐
 │                        STREAMLIT DASHBOARD (port 8501)                      │
 │                                                                             │
-│  Tab 1: Pipeline runner (SSE) + paginated article feed + NER sidebar       │
+│  Tab 1: Pipeline runner (SSE) + paginated article feed + NER sidebar        │
 │  Tab 2: UMAP 2D topic map (Plotly scatter, BERTopic keywords)               │
 │  Tab 3: Contradiction explorer (PyVis network + side-by-side compare)       │
 │  Tab 4: Topic frequency trends + sentiment ratio by source + summary card   │
@@ -113,7 +117,7 @@ Live Dashboard (4 tabs)
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-ARTICLE LIFECYCLE — from RSS feed to dashboard
+## Article Lifecycle — from RSS feed to dashboard
 
 ```
   INPUT: "Solar capacity doubles in Latin America" (Mongabay LATAM, ES)
@@ -280,6 +284,7 @@ ARTICLE LIFECYCLE — from RSS feed to dashboard
   (Tab 1 feed)            ?query="solar LATAM"          (Proyecto Agentes)
                           → this doc, score=0.93
                           (X-RAG-Key required)
+```
 
 ### Key design decisions
 
