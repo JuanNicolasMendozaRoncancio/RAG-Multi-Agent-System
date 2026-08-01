@@ -1,0 +1,49 @@
+name: Agents Smoke Test
+
+on:
+  schedule:
+    - cron: "0 4 1,15 * *"  # 1st and 15th of every month at 04:00 UTC
+  workflow_dispatch:
+
+jobs:
+  agents-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: |
+            shared/requirements.txt
+            agent_worker/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r shared/requirements.txt
+          pip install -r agent_worker/requirements.txt
+          pip install python-dotenv
+
+      - name: Run agents smoke test
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: |
+          python -c "
+          from dotenv import load_dotenv
+          load_dotenv()
+          from agent_worker.agents import run_agents
+          result = run_agents(days=7)
+          assert result['summary'], 'Synthesis Agent produced empty summary'
+          assert not result['errors'], f'Agent errors: {result[\"errors\"]}'
+          insights = result['analytical_insights'].get('insights', [])
+          assert len(insights) > 0, 'Analytical Agent produced no insights'
+          print(f'Smoke test passed: {len(insights)} insights, summary={len(result[\"summary\"])} chars')
+          "

@@ -33,6 +33,11 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 import openai
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,9 +99,9 @@ def _make_api_error() -> openai.APIError:
 @pytest.fixture(autouse=True)
 def set_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide fake API keys so _get_groq_client / _get_gemini_client don't raise."""
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_fakegroqkey")
-    monkeypatch.setenv("GEMINI_API_KEY", "AIza_fakegeminikey")
-    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
+    monkeypatch.setenv("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+    monkeypatch.setenv("LLM_PROVIDER", os.getenv("LLM_PROVIDER", "groq"))
 
 
 # ---------------------------------------------------------------------------
@@ -142,33 +147,16 @@ class TestChatCompleteHappyPath:
         and model=_GROQ_MODEL.
         """
         from shared.llm_client import chat_complete, _GROQ_MODEL
-
-        mock_response = _make_completion_response("Hello from Groq!")
-
-        with patch("shared.llm_client._get_groq_client") as mock_get_groq:
-            mock_client = MagicMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_groq.return_value = mock_client
-
-            result = chat_complete([{"role": "user", "content": "Say hello"}])
-
-        assert result["content"] == "Hello from Groq!"
+        result = chat_complete([{"role": "user", "content": "Say hello briefly"}])
+        assert isinstance(result["content"], str)
+        assert len(result["content"]) > 0
         assert result["provider"] == "groq"
         assert result["model"] == _GROQ_MODEL
 
     def test_result_has_required_keys(self) -> None:
         """The return dict must always have content, provider, and model."""
         from shared.llm_client import chat_complete
-
-        mock_response = _make_completion_response("response text")
-
-        with patch("shared.llm_client._get_groq_client") as mock_get_groq:
-            mock_client = MagicMock()
-            mock_client.chat.completions.create.return_value = mock_response
-            mock_get_groq.return_value = mock_client
-
-            result = chat_complete([{"role": "user", "content": "test"}])
-
+        result = chat_complete([{"role": "user", "content": "Say one word"}])
         assert set(result.keys()) == {"content", "provider", "model"}
 
     def test_json_mode_passes_response_format(self) -> None:
@@ -359,14 +347,8 @@ class TestChatCompleteBothFail:
 # ---------------------------------------------------------------------------
 
 class TestLlmProviderEnvVar:
-    def test_llm_provider_gemini_skips_groq(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """
-        LLM_PROVIDER=gemini must bypass Groq entirely and use Gemini directly.
-        Used in testing and when Groq quota is known to be exhausted.
-        """
-        from shared.llm_client import chat_complete
+    def test_llm_provider_gemini_skips_groq(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from shared.llm_client import chat_complete, _GEMINI_MODEL
 
         monkeypatch.setenv("LLM_PROVIDER", "gemini")
 
@@ -380,7 +362,6 @@ class TestLlmProviderEnvVar:
             patch("shared.llm_client._get_gemini_client", return_value=gemini_mock),
         ):
             result = chat_complete([{"role": "user", "content": "test"}])
-            # _get_groq_client must never be called
             mock_groq_builder.assert_not_called()
 
         assert result["provider"] == "gemini"

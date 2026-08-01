@@ -11,5 +11,3 @@ Dockerfile
 .dockerignore
 
 .cloudignore
-
-models/
