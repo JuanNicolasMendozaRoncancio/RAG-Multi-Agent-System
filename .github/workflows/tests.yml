@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   tests:
@@ -44,6 +45,6 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}    
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
         run: pytest tests/test_integration.py tests/test_llm_client.py -v
