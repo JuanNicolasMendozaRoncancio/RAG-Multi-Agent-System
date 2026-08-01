@@ -1,0 +1,692 @@
+# 🌍 Climate & Energy Intelligence System
+
+<div align="center">
+
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![MongoDB](https://img.shields.io/badge/MongoDB_Atlas-M0_Free-47A248?style=flat&logo=mongodb&logoColor=white)](https://www.mongodb.com/atlas)
+[![LangGraph](https://img.shields.io/badge/LangGraph-0.2.55-1C3C3C?style=flat&logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraph/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.35+-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io)
+[![BERTopic](https://img.shields.io/badge/BERTopic-0.17.4-orange?style=flat)](https://maartengr.github.io/BERTopic/)
+[![Groq](https://img.shields.io/badge/Groq-LPU_Inference-F55036?style=flat)](https://groq.com)
+[![Prefect](https://img.shields.io/badge/Prefect-Cloud-1B4FFF?style=flat&logo=prefect&logoColor=white)](https://prefect.io)
+[![Tests](https://img.shields.io/github/actions/workflow/status/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System/tests.yml?label=tests&logo=github)](https://github.com/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System/actions)
+[![Nightly](https://img.shields.io/github/actions/workflow/status/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System/nightly.yml?label=nightly&logo=github)](https://github.com/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
+[![Free Tier](https://img.shields.io/badge/infrastructure-100%25_free_tier-22c55e?style=flat)](#infrastructure)
+
+**Multilingual RAG pipeline (ES/EN/FR) with multi-agent analysis over climate and energy journalism.**
+
+Ingests 6 RSS sources → NLP enrichment → multilingual embeddings → BERTopic clustering → LLM sentiment classification → 4-agent LangGraph system → live Streamlit dashboard with SSE streaming.
+
+[Architecture](#architecture) · [Quick Start](#quick-start) · [API Reference](#api-reference) · [Inter-System Integration](#inter-system-integration) · [Tests](#tests) · [Infrastructure](#infrastructure)
+
+</div>
+
+---
+
+## Overview
+
+The Climate & Energy Intelligence System is a project that demonstrates production-grade RAG and multi-agent architecture on a constrained (100% free-tier) infrastructure. The system continuously ingests multilingual climate and energy journalism, enriches it with NLP and LLM analysis, and exposes structured endpoints consumed by a live Streamlit dashboard and by external agent systems.
+
+**What it does end to end:**
+
+```
+RSS Feeds (6 sources, 3 languages)
+    ↓  feedparser + trafilatura
+MongoDB RAW colection (300+ articles)
+    ↓  spaCy (es/en/fr) + langdetect
+MongoDB CLEAN colection(lemmas, NER, language)
+    ↓  HF Serverless API (paraphrase-multilingual-MiniLM-L12-v2, 384 dims)
+MongoDB CLEAN colection (+embedding field)
+    ↓  BERTopic (UMAP 384→5 + HDBSCAN)
+MongoDB CLEAN colection (+topic_id field)
+    ↓  Groq llama-3.1-8b-instant → Gemini 2.0 Flash (fallback)
+MongoDB CURATED colection (sentiment, intensity, principal_subject, main_argument)
+    ↓  LangGraph (Analytical → Contradiction → Trend → Synthesis)
+MongoDB SUMMARIES colection (narrative summary)
+    ↓  FastAPI SSE + Streamlit
+Live Dashboard (4 tabs)
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        DATA LAYER — MongoDB Atlas M0                        │
+│                                                                             │
+│   RAW ──────► CLEAN ─────────────────────► CURATED ──────► SUMMARIES       │
+│   (sha256)   (lemmas, NER, embedding,       (sentiment,     (narrative)     │
+│              topic_id)                      intensity,                      │
+│                                             subject, arg)                   │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │ motor (async) / pymongo (sync agents)
+┌────────────────────────────────┼────────────────────────────────────────────┐
+│                        NLP WORKER                                           │
+│                                                                             │
+│  feed_reader.py ──► scraper.py ──► pipeline.py ──► embedder.py             │
+│  (feedparser)       (trafilatura)  (spaCy ×3      (HF Serverless API       │
+│                                    langdetect)     384-dim vectors)         │
+│                                        │                                    │
+│                                  topic_modeler.py ──► sentiment.py         │
+│                                  (BERTopic +          (Groq → Gemini       │
+│                                   UMAP + HDBSCAN)      fallback, JSON)     │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │
+┌────────────────────────────────┼────────────────────────────────────────────┐
+│                        AGENT WORKER (LangGraph)                             │
+│                                                                             │
+│  analytical_agent ──► contradiction_agent ──► trend_agent ──► synthesis    │
+│  (MongoDB agg by      (Atlas Vector Search    (ISO-week      (narrative     │
+│   source/lang/topic)   CURATED ↔ CURATED)     regression)    → SUMMARIES)  │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │ asyncio.run_in_executor
+┌────────────────────────────────┼────────────────────────────────────────────┐
+│                        FASTAPI  (port 8000)                                 │
+│                                                                             │
+│  POST /pipeline/run  (SSE streaming, 6 steps)                              │
+│  GET  /health        /articles   /topics    /contradictions                 │
+│       /trends        /summary    /embeddings                                │
+│                                                                             │
+│  ── Inter-system layer (X-RAG-Key auth) ──                                  │
+│  GET  /rag/search          (Atlas Vector Search → CURATED)                  │
+│  GET  /rag/topics/active   (linear regression slope, rising topics)         │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │ requests (sync HTTP)
+┌────────────────────────────────┼────────────────────────────────────────────┐
+│                        STREAMLIT DASHBOARD (port 8501)                      │
+│                                                                             │
+│  Tab 1: Pipeline runner (SSE) + paginated article feed + NER sidebar       │
+│  Tab 2: UMAP 2D topic map (Plotly scatter, BERTopic keywords)               │
+│  Tab 3: Contradiction explorer (PyVis network + side-by-side compare)       │
+│  Tab 4: Topic frequency trends + sentiment ratio by source + summary card   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                 │
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SCHEDULED MAINTENANCE                                │
+│                                                                             │
+│  GitHub Actions cron (03:00 UTC daily)                                      │
+│  └─► prefect_flow.py: ingestion_task → nlp_task                             │
+│      (no LLM calls — preserves free-tier token budget)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+ARTICLE LIFECYCLE — from RSS feed to dashboard
+
+  INPUT: "Solar capacity doubles in Latin America" (Mongabay LATAM, ES)
+  URL: https://es.mongabay.com/2024/06/solar-latam/
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  STEP 1 — feedparser + trafilatura                                       │
+  │                                                                          │
+  │  fetch_feed("mongabay_latam")   scrape_article(url, "mongabay_latam")    │
+  │       │                                        │                         │
+  │       ▼                                        ▼                         │
+  │  url, feed_title,               url, title, text (full article body),    │
+  │  feed_date, source              source, publication_date,                │
+  │                                 ingestion_date (UTC),                    │
+  │                                 sha256 = SHA-256(url.rstrip("/"))        │
+  │                                 detected_language = None  ◄── not yet    │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │  insert if sha256 not in RAW
+                                             ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  MongoDB RAW                                                             │
+  │                                                                          │
+  │  {                                                                       │
+  │    url:               "https://es.mongabay.com/2024/06/solar-latam/"     │
+  │    title:             "La capacidad solar se duplica en América Latina"  │
+  │    text:              "La energía solar en América Latina ha crecido..." │
+  │    source:            "mongabay_latam"                                   │
+  │    publication_date:  "2024-06-01"                                       │
+  │    ingestion_date:    "2024-06-01T12:00:00+00:00"                        │
+  │    sha256:            "a3f8c2..."   ◄── dedup key, unique index          │
+  │    detected_language: null         ◄── filled in next step               │
+  │  }                                                                       │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │  url not in CLEAN → process
+                                             ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  STEP 2 — langdetect + spaCy es_core_news_md                             │
+  │                                                                          │
+  │  detect(text[:2000]) → "es"    supported                                 |
+  │       │                                                                  │
+  │       ▼                                                                  │
+  │  _clean_text()  →  strip HTML tags, collapse whitespace                  │
+  │       │                                                                  │
+  │       ▼                                                                  │
+  │  nlp(clean_text)  →  spaCy Doc                                           │
+  │    ├── tokens: [solar, capacidad, duplicar, América, Latina, energía...] │
+  │    │   filter: is_alpha=True, is_stop=False, len>1                       │
+  │    │   lemmatize → lemmatized_tokens: ["solar","capacidad","duplicar",   │
+  │    │                                   "latina","energía","renovable"]   │
+  │    └── ents: [(América Latina, LOC), (Brasil, GPE), (Chile, GPE)]        │
+  │              → entities: [{"text":"América Latina","label":"LOC"}, ...]  │
+  │                                                                          │
+  │  _id from RAW removed  ◄── prevents duplicate key error on CLEAN index   │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │  insert_clean_article()
+                                             ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  MongoDB CLEAN                                                           │
+  │                                                                          │
+  │  {  ...all RAW fields (minus _id)...                                     │
+  │    detected_language:  "es"                     ◄── overrides null       │
+  │    lemmatized_tokens:  ["solar","capacidad","duplicar","energía",...]    │
+  │    entities:           [{"text":"América Latina","label":"LOC"},...]     │
+  │    ── embedding:  (not yet) ──────────────────────────────────────────── │
+  │    ── topic_id:   (not yet) ──────────────────────────────────────────── │
+  │  }                                                                       │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │
+                  ┌──────────────────────────┼──────────────────────────┐
+                  │  STEP 3                  │  STEP 4                  │
+                  ▼                          ▼                          │
+  ┌───────────────────────────┐    ┌───────────────────────────┐        │
+  │  HF Serverless API        │    │  BERTopic (joblib model)  │        │
+  │                           │    │                           │        │
+  │  input:                   │    │  assign_topics() loads    │        │
+  │  "solar capacidad         │    │  bertopic_model.joblib    │        │
+  │   duplicar energía..."    │    │                           │        │
+  │  (lemmas joined)          │    │  UMAP: 384-dim → 5-dim    │        │
+  │       │                   │    │  (cosine, n_neighbors=15) │        │
+  │       ▼                   │---→│       │                   │        │
+  │  paraphrase-multilingual  │    │  HDBSCAN: predict cluster │        │
+  │  -MiniLM-L12-v2           │    │  (min_cluster_size=10)    │        │
+  │       │                   │    │       │                   │        │
+  │       ▼                   │    │       ▼                   │        │
+  │  embedding: [0.12, -0.34, │    │  topic_id: 2              │        │
+  │    0.08, ..., 0.21]       │    │  (topic 2 = renewable     │        │
+  │  (384 floats, cosine sim) │    │   energy / solar)         │        │
+  └───────────┬───────────────┘    └───────────┬───────────────┘        │
+              │  $set {embedding}              │  $set {topic_id}       │
+              └────────────────────────────────┘                        │
+                                             │  update_one on CLEAN     │
+                                             ▼                          │
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  MongoDB CLEAN  (enriched)                                           │
+  │                                                                      │
+  │  {  ...previous fields...                                            │
+  │    embedding:  [0.12, -0.34, 0.08, ..., 0.21]  (384 floats)          │
+  │    topic_id:   2                                                     │
+  │  }                                                                   │
+  └──────────────────────────────────────────┬───────────────────────────┘
+                                             │  url not in CURATED + has topic_id
+                                             ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  STEP 5 — Groq llama-3.1-8b-instant (json_mode=True)                     │
+  │                                                                          │
+  │  system: "You are a sentiment analysis engine...respond ONLY with JSON"  │
+  │  user:   "Title: La capacidad solar...\n\nText: La energía solar en      │
+  │           América Latina ha crecido... [first 1500 chars]"               │
+  │                                                                          │
+  │  response → {                                                            │
+  │    "sentiment":          "positive",                                     │
+  │    "intensity":          0.82,                                           │
+  │    "principal_subject":  "solar energy Latin America",                   │
+  │    "main_argument":      "Solar capacity doubled driven by policy..."    │
+  │  }                                                                       │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │  insert_curated_article()
+                                             │  (_id from CLEAN stripped)
+                                             ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  MongoDB CURATED  (final enriched schema)                                │
+  │                                                                          │
+  │  {                                                                       │
+  │    url:               "https://es.mongabay.com/2024/06/solar-latam/"     │
+  │    title:             "La capacidad solar se duplica en América Latina"  │
+  │    text:              "La energía solar en América Latina ha crecido..." │
+  │    source:            "mongabay_latam"                                   │
+  │    detected_language: "es"                                               │
+  │    publication_date:  "2024-06-01"                                       │
+  │    ingestion_date:    "2024-06-01T12:00:00+00:00"                        │
+  │    sha256:            "a3f8c2..."                                        │
+  │    lemmatized_tokens: ["solar","capacidad","duplicar","energía",...]     │
+  │    entities:          [{"text":"América Latina","label":"LOC"},...]      │
+  │    embedding:         [0.12, -0.34, 0.08, ..., 0.21]  (384 floats)       │
+  │    topic_id:          2                                                  │
+  │    sentiment:         "positive"                      ◄── LLM output     │
+  │    intensity:         0.82                            ◄── LLM output     │
+  │    principal_subject: "solar energy Latin America"    ◄── LLM output     │
+  │    main_argument:     "Solar capacity doubled..."     ◄── LLM output     │
+  │  }                                                                       │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │  read by LangGraph agents
+                                             ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  STEP 6 — LangGraph agents (pymongo, synchronous)                        │
+  │                                                                          │
+  │  Analytical Agent:   aggregates this doc under source="mongabay_latam",  │
+  │                       language="es", topic_id=2                          │
+  │                                                                          │
+  │  Contradiction Agent: Atlas Vector Search on CURATED embedding →         │
+  │                        finds semantically similar articles with          │
+  │                        sentiment="negative" (cosine sim ≥ 0.65)          │
+  │                                                                          │
+  │  Trend Agent:         counts this doc in ISO week for topic_id=2,        │
+  │                        contributes to slope calculation                  │
+  │                                                                          │
+  │  Synthesis Agent:     doc's insights folded into narrative summary       │
+  │                        → written to SUMMARIES collection                 │
+  └──────────────────────────────────────────┬───────────────────────────────┘
+                                             │
+            ┌────────────────────────────────┼────────────────────────────┐
+            ▼                                ▼                            ▼
+  GET /articles           GET /rag/search               GET /rag/topics/active
+  (Tab 1 feed)            ?query="solar LATAM"          (Proyecto Agentes)
+                          → this doc, score=0.93
+                          (X-RAG-Key required)
+
+### Key design decisions
+
+**Why BERTopic over LDA for topic modeling:** LDA operates on bag-of-words — "solar" (EN) and "solaire" (FR) land in different topics because LDA sees tokens, not semantics. BERTopic operates on the 384-dimensional multilingual embeddings already stored in CLEAN: "solar energy" and "énergie solaire" are already close in that space because `paraphrase-multilingual-MiniLM-L12-v2` was trained on parallel multilingual data. BERTopic inherits cross-lingual clustering for free.
+
+**Why synchronous pymongo inside LangGraph agents and not motor:** LangGraph's `StateGraph.invoke()` is synchronous. Running `asyncio.run()` inside an already-running event loop (FastAPI) may raise problems. The agents use `pymongo` (blocking) while the FastAPI/pipeline layer uses `motor` (async). Both point to the same Atlas cluster via `MONGODB_URI`.
+
+**Why Groq → Gemini fallback via OpenAI SDK:** Both Groq (`api.groq.com/openai/v1`) and Gemini (`generativelanguage.googleapis.com/v1beta/openai/`) expose OpenAI-compatible endpoints. The same `openai.OpenAI` client handles both with only two string changes.
+
+**Why train BERTopic once and `assign_topics()` on every run:** Retraining on every nightly run would renumber topics, breaking the dashboard's topic labels and the `/rag/topics/active` slope calculations. The model is trained once, serialized with `joblib` to `models/bertopic_model.joblib`, and loaded for inference on new articles.
+
+**Why nightly maintenance runs only ingestion + NLP (not embeddings/sentiment/agents):** Ingestion (trafilatura + feedparser) and NLP (spaCy) are purely local. Embeddings require the HF Serverless API; sentiment requires Groq/Gemini (14,400 req/day combined). The split preserves free-tier budgets: by 06:00 UTC, new articles are in RAW and CLEAN, ready for the on-demand pipeline from the dashboard.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.14+
+- MongoDB Atlas account (M0 free tier, Paris region recommended)
+- Hugging Face account (free token)
+- Groq account (free API key — 14,400 req/day)
+- Gemini account (free API key — 1,500 req/day fallback)
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/JuanNicolasMendozaRoncancio/RAG-Multi-Agent-System.git
+cd RAG-Multi-Agent-System
+
+python -m venv .venv
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
+
+pip install -r shared/requirements.txt
+pip install -r nlp_worker/requirements.txt
+pip install -r agent_worker/requirements.txt
+pip install -r api/requirements.txt
+pip install -r dashboard/requirements.txt
+
+python -m spacy download es_core_news_md
+python -m spacy download en_core_web_md
+python -m spacy download fr_core_news_md
+```
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+# Edit .env and fill in all values
+```
+
+```env
+MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/rag_climate
+HF_TOKEN=hf_...
+GROQ_API_KEY=gsk_...
+GEMINI_API_KEY=AIza...
+LLM_PROVIDER=groq
+LANGCHAIN_API_KEY=ls__...       # optional — enables LangSmith tracing
+LANGCHAIN_TRACING_V2=true       # optional
+LANGCHAIN_PROJECT=rag-climate   # optional
+RAG_API_KEY=your-secret-key     # required for /rag/* endpoints
+API_BASE_URL=http://localhost:8000  # dashboard → API URL
+```
+
+### 3. Atlas Vector Search indexes
+
+Create two vector search indexes in the Atlas UI (Search → Create Search Index → JSON Editor):
+
+**On `clean` collection** — named `vector_index_1`:
+```json
+{
+  "fields": [{
+    "type": "vector",
+    "path": "embedding",
+    "numDimensions": 384,
+    "similarity": "cosine"
+  }]
+}
+```
+
+**On `curated` collection** — named `vector_index`:
+```json
+{
+  "fields": [{
+    "type": "vector",
+    "path": "embedding",
+    "numDimensions": 384,
+    "similarity": "cosine"
+  }]
+}
+```
+
+### 4. Run the API
+
+```bash
+# From project root, with .venv active
+uvicorn api.main:app --port 8000 --reload
+```
+
+### 5. Run the dashboard
+
+```bash
+streamlit run dashboard/app.py
+```
+
+Open `http://localhost:8501` → Tab 1 → click **▶ Run pipeline**.
+
+### 6. (Optional) Train BERTopic
+
+If you have no pre-trained model yet (first run with enough articles):
+
+```bash
+python -c "
+import asyncio
+from dotenv import load_dotenv
+load_dotenv()
+from nlp_worker.topic_modeler import train_topic_model
+asyncio.run(train_topic_model(min_articles=20))
+"
+```
+
+The model is saved to `models/bertopic_model.joblib`.
+
+### 7. (Optional) Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Services: `api` (8000), `dashboard` (8501), `nlp_worker`, `agent_worker`.
+
+---
+
+## API Reference
+
+All endpoints are served by `uvicorn api.main:app --port 8000`.
+
+### Pipeline
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/pipeline/run` | Trigger full pipeline — streams SSE events (6 steps) |
+| `GET` | `/health` | MongoDB ping + LLM provider status |
+
+**SSE event shape:**
+```json
+{"step": "NLP", "status": "done", "elapsed_s": 4.2, "processed": 12, "skipped": 0}
+```
+Steps: `Ingestion` → `NLP` → `Embeddings` → `BERTopic` → `Sentiment` → `Agents` → `COMPLETED`
+
+### Data endpoints (internal — dashboard)
+
+| Method | Endpoint | Key params | Source |
+|--------|----------|------------|--------|
+| `GET` | `/articles` | `source`, `language`, `sentiment`, `topic_id`, `limit`, `skip` | CURATED |
+| `GET` | `/topics` | `days` | CURATED (aggregation) |
+| `GET` | `/contradictions` | `days`, `threshold`, `max_pairs` | CURATED (Vector Search) |
+| `GET` | `/trends` | `days` | CURATED (aggregation) |
+| `GET` | `/summary` | — | SUMMARIES (latest) |
+| `GET` | `/embeddings` | `limit` | CURATED (UMAP input) |
+
+### Inter-system endpoints
+
+Require `X-RAG-Key: <RAG_API_KEY>` header. Returns `422` if header absent, `401` if wrong.
+
+| Method | Endpoint | Key params | Description |
+|--------|----------|------------|-------------|
+| `GET` | `/rag/search` | `query` (min 3 chars), `top_k` | Semantic search via Atlas Vector Search on CURATED |
+| `GET` | `/rag/topics/active` | `days` | Rising topics ordered by linear regression slope |
+
+---
+
+### Authentication
+
+The `/rag/*` endpoints use a simple shared-secret pattern via `X-RAG-Key` header. This is intentional — both systems run under the same infrastructure owner, so OAuth2/JWT would add complexity without a trust boundary benefit. The key is rotated via the `RAG_API_KEY` environment variable on both sides.
+
+### `/rag/search` — semantic retrieval
+
+```bash
+curl "http://localhost:8000/rag/search?query=renewable+energy+transition&top_k=5" \
+  -H "X-RAG-Key: your-secret-key"
+```
+
+```json
+{
+  "query": "renewable energy transition",
+  "top_k": 5,
+  "returned": 5,
+  "results": [
+    {
+      "url": "https://...",
+      "title": "Solar capacity doubles in Latin America",
+      "source": "mongabay_latam",
+      "detected_language": "es",
+      "sentiment": "positive",
+      "intensity": 0.82,
+      "topic_id": 2,
+      "principal_subject": "solar energy Latin America",
+      "main_argument": "Solar installations have doubled...",
+      "publication_date": "2024-06-01",
+      "extract": "La capacidad solar en América Latina...",
+      "score": 0.9341
+    }
+  ]
+}
+```
+
+**Why this response shape:** The RCA Agent needs `sentiment`, `intensity`, `topic_id`, and `main_argument` to contextualize electricity market anomalies with related climate policy coverage. `score` lets the agent threshold results by confidence. Full `text` and `embedding` are excluded to keep the payload lightweight.
+
+### `/rag/topics/active` — rising topics
+
+```bash
+curl "http://localhost:8000/rag/topics/active?days=14" \
+  -H "X-RAG-Key: your-secret-key"
+```
+
+```json
+{
+  "days": 14,
+  "topics_count": 5,
+  "topics": [
+    {
+      "topic_id": 3,
+      "slope": 2.5,
+      "total_articles": 18,
+      "avg_intensity": 0.71,
+      "dominant_sentiment": "negative",
+      "weeks_observed": 2
+    }
+  ]
+}
+```
+
+Topics are ordered by linear regression slope over weekly article counts — steepest growth first. The Narrative Agent uses this to enrich electricity market reports with "topics gaining momentum in climate discourse."
+
+---
+
+## Sentiment Benchmark
+
+Three classifiers compared on the 222-article CURATED corpus:
+
+| Classifier | Accuracy | F1-macro | Cohen's κ | N |
+|-----------|----------|----------|-----------|---|
+| LogisticRegression (5-fold CV on embeddings) | 0.7432 | 0.4793 | — | 222 |
+| Groq `llama-3.1-8b-instant` vs CURATED labels | 0.9000 | 0.8360 | 0.7857 | 30 |
+| Gemini `gemini-2.0-flash` vs CURATED labels | 0.9333 | 0.8333 | 0.8438 | 30 |
+
+Groq/Gemini kappa > 0.60 (substantial agreement): the fallback mechanism does not degrade output quality. Full benchmark report: [`docs/sentiment_benchmark.md`](docs/sentiment_benchmark.md).
+
+---
+
+## LLM Strategy
+
+```
+chat_complete(messages, json_mode=False)
+        │
+        ▼
+   LLM_PROVIDER env var
+        │
+  ┌─────┴──────┐
+  │   groq     │   llama-3.1-8b-instant (primary)
+  │            │   14,400 req/day free · sub-100ms TTFT
+  └──────┬─────┘
+  RateLimitError │ APITimeoutError (>30s) │ APIError
+         ▼
+  ┌─────────────┐
+  │   gemini    │   gemini-2.0-flash (fallback)
+  │             │   1,500 req/day free · OpenAI-compatible
+  └─────────────┘
+         │
+   RuntimeError if both fail
+```
+
+Both providers are accessed via the OpenAI Python SDK pointed at their respective OpenAI-compatible base URLs. No provider-specific SDK is required. `LLM_PROVIDER=gemini` bypasses Groq entirely — useful for testing the fallback path.
+
+---
+
+## Tests
+
+```bash
+# Install dev dependencies
+pip install pytest pytest-asyncio mongomock httpx python-dotenv
+
+# Run all tests (no real API calls, no Atlas connection needed)
+pytest tests/ -v
+
+# Run specific test modules
+pytest tests/test_embedder.py tests/test_pipeline.py -v
+pytest tests/test_integration.py -v   # full pipeline chain (4 stages)
+pytest tests/test_rag_endpoints.py -v  # auth + validation (FastAPI TestClient)
+```
+
+**Test architecture:** All external dependencies are mocked — MongoDB via `mongomock` wrapped in async-compatible `_AsyncCollection/_AsyncDb/_AsyncCursor` helpers (motor API contract, synchronous internals), HF API via `httpx.AsyncClient.post` patched with `AsyncMock`, LLMs via `chat_complete` patched. No real Atlas connection or API keys required for the unit and integration test suites.
+
+**Key principle — patch where the name is looked up:**
+```python
+# WRONG: replaces the attribute in the source module,
+# but embedder.py's local reference still points to the original
+patch("shared.db.get_db", ...)
+
+# CORRECT: patches the name in the namespace where it is used
+patch("nlp_worker.embedder.get_db", ...)
+```
+
+### GitHub Actions
+
+| Workflow | Trigger | What it runs |
+|----------|---------|--------------|
+| `tests.yml` | Push/PR to `master` | `test_integration.py` + `test_llm_client.py` (real API keys via secrets) |
+| `nightly.yml` | Daily 03:00 UTC | `prefect_flow.py` — ingestion + NLP only (no LLM) |
+| `agents_smoke.yml` | 1st & 15th of month | `run_agents(days=7)` — verifies full agent graph end-to-end |
+
+---
+
+## Infrastructure
+
+Everything runs on free-tier services with zero cloud spend:
+
+| Service | Purpose | Free tier used |
+|---------|---------|----------------|
+| MongoDB Atlas M0 | Primary database (4 collections, 2 Vector Search indexes) | 512 MB storage, Paris (AWS) |
+| Hugging Face Serverless API | Multilingual embeddings (384-dim) | Rate-limited CPU inference |
+| Groq Cloud | Primary LLM (`llama-3.1-8b-instant`) | 14,400 req/day |
+| Google Gemini | Fallback LLM (`gemini-2.0-flash`) | 1,500 req/day |
+| GitHub Actions | CI + nightly maintenance cron | 2,000 min/month |
+| Prefect Cloud | Flow orchestration and monitoring | Free tier |
+| Streamlit Community Cloud | Dashboard hosting | Free |
+| Hugging Face Spaces | API hosting (CPU Basic) | Free |
+
+---
+
+## Project Structure
+
+```
+rag-climate/
+├── shared/
+│   ├── db.py              # Motor async client, collection helpers, index creation
+│   ├── dedup.py           # SHA-256 URL hashing for deduplication
+│   └── llm_client.py      # Groq → Gemini fallback, single entry point
+│
+├── nlp_worker/
+│   ├── feed_reader.py     # feedparser — 6 RSS sources (ES/EN/FR)
+│   ├── scraper.py         # trafilatura — article extraction
+│   ├── ingest.py          # Ingestion pipeline runner
+│   ├── pipeline.py        # spaCy NLP — language detection, lemmatization, NER
+│   ├── embedder.py        # HF Serverless API — 384-dim multilingual vectors
+│   ├── topic_modeler.py   # BERTopic — UMAP + HDBSCAN, train/assign separation
+│   └── sentiment.py       # LLM sentiment classification → CURATED
+│
+├── agent_worker/
+│   └── agents.py          # LangGraph: Analytical → Contradiction → Trend → Synthesis
+│
+├── api/
+│   └── main.py            # FastAPI: SSE pipeline, data endpoints, /rag/* inter-system
+│
+├── dashboard/
+│   └── app.py             # Streamlit: 4 tabs — feed, UMAP, contradictions, trends
+│
+├── tests/
+│   ├── test_embedder.py       # Unit tests for embedding module
+│   ├── test_pipeline.py       # Unit tests for NLP pipeline
+│   ├── test_topic_modeler.py  # Unit tests for BERTopic train/assign
+│   ├── test_sentiment.py      # Unit tests for sentiment classifier
+│   ├── test_integration.py    # Full 4-stage pipeline chain integration tests
+│   ├── test_llm_client.py     # Unit tests for Groq/Gemini fallback client
+│   ├── test_rag_endpoints.py  # FastAPI auth + validation tests
+│   └── testdb.py              # Shared MongoDB test fixtures
+│
+├── docs/
+│   └── sentiment_benchmark.md # LogisticRegression vs Groq vs Gemini results
+│
+├── models/
+│   └── bertopic_model.joblib  # Serialized BERTopic (generated, gitignored)
+│
+├── prefect_flow.py        # Nightly maintenance flow (ingestion + NLP only)
+├── pyproject.toml         # Project metadata, pytest config, ruff/mypy config
+├── Docker-compose.yml     # 4-service compose: api, dashboard, nlp_worker, agent_worker
+└── .github/workflows/     # CI: tests.yml, nightly.yml, agents_smoke.yml
+```
+
+---
+
+## RSS Sources
+
+| Source | Language | Domain |
+|--------|----------|--------|
+| Yale Environment 360 | English | Environmental science journalism |
+| Carbon Brief | English | Climate science and policy |
+| Bon Pote | French | Climate communication |
+| Reporterre | French | Environmental investigative journalism |
+| Mongabay LATAM | Spanish | Tropical forest and biodiversity |
+| Climática | Spanish | Climate crisis — Ibero-American perspective |
+
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+Built as part of an M2 DS/ML portfolio. Infrastructure: 100% free-tier.
+
+</div>
